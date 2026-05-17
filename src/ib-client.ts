@@ -11,17 +11,49 @@ interface IBClientConfig {
   port: number;
 }
 
+type OrderType = "MKT" | "LMT" | "STP" | "STP_LIMIT" | "TRAIL" | "TRAILLMT" | "MIDPRICE" | "MOC" | "LOC";
+
 interface OrderRequest {
   accountId: string;
   symbol: string;
   action: "BUY" | "SELL";
-  orderType: "MKT" | "LMT" | "STP";
+  orderType: OrderType;
   quantity: number;
   price?: number;
   stopPrice?: number;
+  trailingAmt?: number;
+  trailingType?: "amt" | "%";
   suppressConfirmations?: boolean;
   exchange?: string;
   tif?: "DAY" | "GTC" | "IOC" | "OPG";
+  outsideRTH?: boolean;
+  parentId?: string;
+  cOID?: string;
+  ocaGroup?: string;
+  useAdaptive?: boolean;
+  referrer?: string;
+}
+
+export interface RawOrderRequest {
+  conid: number | string;
+  side: "BUY" | "SELL";
+  orderType: OrderType;
+  quantity: number | string;
+  tif?: "DAY" | "GTC" | "IOC" | "OPG";
+  price?: number;
+  auxPrice?: number;
+  trailingAmt?: number;
+  trailingType?: "amt" | "%";
+  exchange?: string;
+  outsideRTH?: boolean;
+  parentId?: string;
+  cOID?: string;
+  ocaGroup?: string;
+  useAdaptive?: boolean;
+  referrer?: string;
+  secType?: string;
+  conidex?: string;
+  [extra: string]: any;
 }
 
 const isError = (error: unknown): error is Error => {
@@ -676,27 +708,50 @@ export class IBClient {
 
       // Prepare order object
       const order: any = {
-        conid: Number(conid), // Ensure conid is number
+        conid: Number(conid),
         orderType: orderRequest.orderType,
         side: orderRequest.action,
-        quantity: Number(orderRequest.quantity), // Ensure quantity is number
-        tif: orderRequest.tif || "DAY", // Time in force - default to DAY to avoid orphaned orders
+        quantity: Number(orderRequest.quantity),
+        tif: orderRequest.tif || "DAY",
       };
 
-      // Include exchange if specified
-      if (orderRequest.exchange) {
-        order.exchange = orderRequest.exchange;
+      if (orderRequest.exchange) order.exchange = orderRequest.exchange;
+
+      // Price-bearing types: LMT, STP_LIMIT, LOC, TRAILLMT all carry a `price`.
+      if (
+        (orderRequest.orderType === "LMT" ||
+          orderRequest.orderType === "STP_LIMIT" ||
+          orderRequest.orderType === "LOC" ||
+          orderRequest.orderType === "TRAILLMT") &&
+        orderRequest.price !== undefined
+      ) {
+        order.price = Number(orderRequest.price);
       }
 
-      // Add price for limit orders
-      if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
-        (order as any).price = Number(orderRequest.price);
+      // Aux-price (stop trigger) types: STP and STP_LIMIT.
+      if (
+        (orderRequest.orderType === "STP" || orderRequest.orderType === "STP_LIMIT") &&
+        orderRequest.stopPrice !== undefined
+      ) {
+        order.auxPrice = Number(orderRequest.stopPrice);
       }
 
-      // Add stop price for stop orders
-      if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) {
-        (order as any).auxPrice = Number(orderRequest.stopPrice);
+      // Trailing parameters: TRAIL and TRAILLMT.
+      if (
+        (orderRequest.orderType === "TRAIL" || orderRequest.orderType === "TRAILLMT") &&
+        orderRequest.trailingAmt !== undefined
+      ) {
+        order.trailingAmt = Number(orderRequest.trailingAmt);
+        order.trailingType = orderRequest.trailingType || "amt";
       }
+
+      // Pass-through optional fields.
+      if (orderRequest.outsideRTH !== undefined) order.outsideRTH = orderRequest.outsideRTH;
+      if (orderRequest.parentId !== undefined) order.parentId = orderRequest.parentId;
+      if (orderRequest.cOID !== undefined) order.cOID = orderRequest.cOID;
+      if (orderRequest.ocaGroup !== undefined) order.ocaGroup = orderRequest.ocaGroup;
+      if (orderRequest.useAdaptive !== undefined) order.useAdaptive = orderRequest.useAdaptive;
+      if (orderRequest.referrer !== undefined) order.referrer = orderRequest.referrer;
 
       // Place the order
       const response = await this.client.post(
@@ -737,6 +792,62 @@ export class IBClient {
       }
 
       throw new Error("Failed to place order");
+    }
+  }
+
+  /**
+   * Submit a pre-built orders payload directly. Used for bracket (parentId),
+   * OCA (ocaGroup), and multi-leg orders where the caller already knows the
+   * conid(s) and wants full control over the per-order fields. Skips the
+   * single-symbol secdef/search lookup.
+   *
+   * The IBKR endpoint POST /iserver/account/{accountId}/orders accepts the
+   * `{ orders: [...] }` envelope regardless of count.
+   */
+  async placeOrdersAdvanced(
+    accountId: string,
+    orders: RawOrderRequest[],
+    suppressConfirmations = false
+  ): Promise<any> {
+    try {
+      const normalized = orders.map((o) => {
+        const out: Record<string, any> = { ...o };
+        if (out.conid !== undefined) out.conid = Number(out.conid);
+        if (out.quantity !== undefined) out.quantity = Number(out.quantity);
+        if (out.price !== undefined) out.price = Number(out.price);
+        if (out.auxPrice !== undefined) out.auxPrice = Number(out.auxPrice);
+        if (out.trailingAmt !== undefined) out.trailingAmt = Number(out.trailingAmt);
+        if (out.tif === undefined) out.tif = "DAY";
+        return out;
+      });
+
+      const response = await this.client.post(
+        `/iserver/account/${accountId}/orders`,
+        { orders: normalized }
+      );
+
+      // Same auto-confirm handshake used by single-order placeOrder.
+      if (Array.isArray(response.data) && response.data.length > 0) {
+        const first = response.data[0];
+        if (first.id && first.message && first.messageIds && suppressConfirmations) {
+          Logger.log("[ORDERS-ADV] Order confirmation received, auto-confirming...", first);
+          return this.confirmOrder(first.id, first.messageIds);
+        }
+      }
+
+      return response.data;
+    } catch (error) {
+      Logger.error("[ORDERS-ADV] Failed to place orders:", error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error(
+          "Authentication required to place orders. Please authenticate with Interactive Brokers first."
+        );
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      throw new Error(
+        `Failed to place orders: ${(error as any)?.response?.data?.error || (error as any)?.message || error}`
+      );
     }
   }
 

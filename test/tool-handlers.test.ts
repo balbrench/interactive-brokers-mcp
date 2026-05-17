@@ -80,6 +80,8 @@ describe('ToolHandlers', () => {
       logout: vi.fn().mockResolvedValue({}),
       setActiveAccount: vi.fn().mockResolvedValue({}),
       getEntityInfo: vi.fn().mockResolvedValue({}),
+      runScanner: vi.fn().mockResolvedValue({ scanResults: [] }),
+      placeOrdersAdvanced: vi.fn().mockResolvedValue([{ id: 'o1' }]),
     } as any;
 
     // Create mock GatewayManager
@@ -590,6 +592,53 @@ describe('ToolHandlers', () => {
     it('resetQuestionSuppression should call the underlying client', async () => {
       await handlers.resetQuestionSuppression({ confirm: true });
       expect(mockIBClient.resetQuestionSuppression).toHaveBeenCalled();
+    });
+  });
+
+  describe('runScanner', () => {
+    it('should derive secType from instrument (STK → STK, OPT → OPT)', async () => {
+      await handlers.runScanner({
+        scanCode: 'TOP_PERC_GAIN',
+        instrument: 'STK',
+        locationCode: 'STK.US.MAJOR',
+        numberOfRows: 25,
+        optionTypeFilter: 'ALL',
+      } as any);
+
+      expect(mockIBClient.runScanner).toHaveBeenCalledWith(
+        expect.objectContaining({ instrument: 'STK', secType: 'STK' })
+      );
+
+      vi.mocked(mockIBClient.runScanner).mockClear();
+
+      await handlers.runScanner({
+        scanCode: 'OPT_VOLUME_MOST_ACTIVE',
+        instrument: 'OPT',
+        locationCode: 'OPT.US.MAJOR',
+        numberOfRows: 25,
+        optionTypeFilter: 'ALL',
+      } as any);
+
+      expect(mockIBClient.runScanner).toHaveBeenCalledWith(
+        expect.objectContaining({ instrument: 'OPT', secType: 'OPT' })
+      );
+    });
+  });
+
+  describe('placeOrdersAdvanced handler', () => {
+    it('should pass orders through to the IBClient', async () => {
+      const orders = [
+        { conid: 265598, side: 'BUY', orderType: 'LMT', quantity: 100, price: 185, cOID: 'p' },
+        { conid: 265598, side: 'SELL', orderType: 'LMT', quantity: 100, price: 195, parentId: 'p' },
+      ];
+
+      await handlers.placeOrdersAdvanced({
+        accountId: 'U12345',
+        orders,
+        suppressConfirmations: true,
+      } as any);
+
+      expect(mockIBClient.placeOrdersAdvanced).toHaveBeenCalledWith('U12345', orders, true);
     });
   });
 

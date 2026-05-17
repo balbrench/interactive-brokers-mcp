@@ -30,13 +30,21 @@ export const PlaceOrderZodShape = {
   accountId: z.string(),
   symbol: z.string(),
   action: z.enum(["BUY", "SELL"]),
-  orderType: z.enum(["MKT", "LMT", "STP"]),
+  orderType: z.enum(["MKT", "LMT", "STP", "STP_LIMIT", "TRAIL", "TRAILLMT", "MIDPRICE", "MOC", "LOC"]),
   quantity: IntegerOrStringIntegerZod,
   price: z.number().optional(),
   stopPrice: z.number().optional(),
+  trailingAmt: z.number().optional(),
+  trailingType: z.enum(["amt", "%"]).optional(),
   suppressConfirmations: z.boolean().optional(),
   exchange: z.string().optional(),
-  tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional()
+  tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional(),
+  outsideRTH: z.boolean().optional(),
+  parentId: z.string().optional(),
+  cOID: z.string().optional(),
+  ocaGroup: z.string().optional(),
+  useAdaptive: z.boolean().optional(),
+  referrer: z.string().optional()
 };
 
 export const GetOrderStatusZodShape = {
@@ -93,6 +101,32 @@ export const ActivateAlertZodShape = {
 export const DeleteAlertZodShape = {
   accountId: z.string(),
   alertId: z.string()
+};
+
+// Multi-leg / bracket / OCA Zod Shape
+export const PlaceOrdersAdvancedZodShape = {
+  accountId: z.string(),
+  orders: z.array(z.object({
+    conid: z.union([z.number(), z.string()]),
+    side: z.enum(["BUY", "SELL"]),
+    orderType: z.enum(["MKT", "LMT", "STP", "STP_LIMIT", "TRAIL", "TRAILLMT", "MIDPRICE", "MOC", "LOC"]),
+    quantity: IntegerOrStringIntegerZod,
+    tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional(),
+    price: z.number().optional(),
+    auxPrice: z.number().optional(),
+    trailingAmt: z.number().optional(),
+    trailingType: z.enum(["amt", "%"]).optional(),
+    exchange: z.string().optional(),
+    outsideRTH: z.boolean().optional(),
+    parentId: z.string().optional(),
+    cOID: z.string().optional(),
+    ocaGroup: z.string().optional(),
+    useAdaptive: z.boolean().optional(),
+    referrer: z.string().optional(),
+    secType: z.string().optional(),
+    conidex: z.string().optional(),
+  }).passthrough()).min(1).max(20),
+  suppressConfirmations: z.boolean().optional(),
 };
 
 // Order lifecycle Zod Shapes
@@ -319,17 +353,28 @@ export const GetMarketDataZodSchema = z.object(GetMarketDataZodShape);
 
 export const PlaceOrderZodSchema = z.object(PlaceOrderZodShape).refine(
   (data) => {
-    if (data.orderType === "LMT" && data.price === undefined) {
+    if ((data.orderType === "LMT" || data.orderType === "LOC") && data.price === undefined) {
       return false;
     }
     if (data.orderType === "STP" && data.stopPrice === undefined) {
       return false;
     }
+    if (data.orderType === "STP_LIMIT" && (data.price === undefined || data.stopPrice === undefined)) {
+      return false;
+    }
+    if (data.orderType === "TRAIL" && data.trailingAmt === undefined) {
+      return false;
+    }
+    if (data.orderType === "TRAILLMT" && (data.trailingAmt === undefined || data.price === undefined)) {
+      return false;
+    }
     return true;
   },
   {
-    message: "LMT orders require price, STP orders require stopPrice",
-    path: ["price", "stopPrice"]
+    message:
+      "LMT/LOC require price; STP requires stopPrice; STP_LIMIT requires both price and stopPrice; " +
+      "TRAIL requires trailingAmt; TRAILLMT requires trailingAmt and price",
+    path: ["price", "stopPrice", "trailingAmt"],
   }
 );
 
@@ -346,6 +391,9 @@ export const CreateAlertZodSchema = z.object(CreateAlertZodShape);
 export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
 
 export const DeleteAlertZodSchema = z.object(DeleteAlertZodShape);
+
+// Multi-leg / bracket Schema
+export const PlaceOrdersAdvancedZodSchema = z.object(PlaceOrdersAdvancedZodShape);
 
 // Order lifecycle Full Schemas
 export const CancelOrderZodSchema = z.object(CancelOrderZodShape);
@@ -393,6 +441,7 @@ export type ForgetFlexQueryInput = z.infer<typeof ForgetFlexQueryZodSchema>;
 export type GetScannerParamsInput = z.infer<typeof GetScannerParamsZodSchema>;
 export type RunScannerInput = z.infer<typeof RunScannerZodSchema>;
 export type GetOptionsChainInput = z.infer<typeof GetOptionsChainZodSchema>;
+export type PlaceOrdersAdvancedInput = z.infer<typeof PlaceOrdersAdvancedZodSchema>;
 export type CancelOrderInput = z.infer<typeof CancelOrderZodSchema>;
 export type ModifyOrderInput = z.infer<typeof ModifyOrderZodSchema>;
 export type PreviewOrderInput = z.infer<typeof PreviewOrderZodSchema>;

@@ -758,6 +758,127 @@ describe('IBClient', () => {
     });
   });
 
+  describe('Extended Order Types', () => {
+    it('should send STP_LIMIT with both price and auxPrice', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: [{ conid: 265598, symbol: 'AAPL' }] });
+      mockClient.post.mockResolvedValueOnce({ data: [{ id: 'o1' }] });
+
+      await client.placeOrder({
+        accountId: 'U1',
+        symbol: 'AAPL',
+        action: 'SELL',
+        orderType: 'STP_LIMIT',
+        quantity: 10,
+        price: 179.5,
+        stopPrice: 180,
+      } as any);
+
+      expect(mockClient.post).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          orders: expect.arrayContaining([
+            expect.objectContaining({ orderType: 'STP_LIMIT', price: 179.5, auxPrice: 180 }),
+          ]),
+        })
+      );
+    });
+
+    it('should send TRAIL with trailingAmt and default trailingType=amt', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: [{ conid: 265598, symbol: 'AAPL' }] });
+      mockClient.post.mockResolvedValueOnce({ data: [{ id: 'o1' }] });
+
+      await client.placeOrder({
+        accountId: 'U1',
+        symbol: 'AAPL',
+        action: 'SELL',
+        orderType: 'TRAIL',
+        quantity: 10,
+        trailingAmt: 1.5,
+      } as any);
+
+      expect(mockClient.post).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          orders: expect.arrayContaining([
+            expect.objectContaining({ orderType: 'TRAIL', trailingAmt: 1.5, trailingType: 'amt' }),
+          ]),
+        })
+      );
+    });
+
+    it('should forward outsideRTH, useAdaptive, parentId, ocaGroup, cOID pass-throughs', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: [{ conid: 265598, symbol: 'AAPL' }] });
+      mockClient.post.mockResolvedValueOnce({ data: [{ id: 'o1' }] });
+
+      await client.placeOrder({
+        accountId: 'U1',
+        symbol: 'AAPL',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 10,
+        price: 100,
+        outsideRTH: true,
+        useAdaptive: true,
+        parentId: 'p-1',
+        ocaGroup: 'oca-1',
+        cOID: 'my-id',
+      } as any);
+
+      const payload = (mockClient.post as any).mock.calls[0][1].orders[0];
+      expect(payload).toMatchObject({
+        outsideRTH: true,
+        useAdaptive: true,
+        parentId: 'p-1',
+        ocaGroup: 'oca-1',
+        cOID: 'my-id',
+      });
+    });
+  });
+
+  describe('placeOrdersAdvanced', () => {
+    it('should POST a normalized orders array to the orders endpoint', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValueOnce({ data: [{ id: 'o1' }] });
+
+      await client.placeOrdersAdvanced('U12345', [
+        { conid: '265598', side: 'BUY', orderType: 'LMT', quantity: '100', price: 185, cOID: 'parent' },
+        { conid: 265598, side: 'SELL', orderType: 'LMT', quantity: 100, price: 195, parentId: 'parent' },
+      ] as any);
+
+      expect(mockClient.post).toHaveBeenCalledWith(
+        '/iserver/account/U12345/orders',
+        {
+          orders: [
+            expect.objectContaining({ conid: 265598, quantity: 100, tif: 'DAY', cOID: 'parent' }),
+            expect.objectContaining({ conid: 265598, quantity: 100, parentId: 'parent', tif: 'DAY' }),
+          ],
+        }
+      );
+    });
+
+    it('should auto-confirm when suppressConfirmations is true and a reply id is returned', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post
+        // First: order placement returns a reply prompt.
+        .mockResolvedValueOnce({ data: [{ id: 'reply-1', message: ['Please confirm'], messageIds: ['m1'] }] })
+        // Second: reply confirmation.
+        .mockResolvedValueOnce({ data: { confirmed: true } });
+
+      const result = await client.placeOrdersAdvanced(
+        'U12345',
+        [{ conid: 265598, side: 'BUY', orderType: 'MKT', quantity: 10 } as any],
+        true
+      );
+
+      expect(mockClient.post).toHaveBeenCalledTimes(2);
+      expect(mockClient.post).toHaveBeenNthCalledWith(2, '/iserver/reply/reply-1', expect.any(Object));
+      expect(result).toEqual({ confirmed: true });
+    });
+  });
+
   describe('Order Lifecycle', () => {
     it('cancelOrder should DELETE the order endpoint', async () => {
       const mockClient = vi.mocked(axios.create).mock.results[0].value;

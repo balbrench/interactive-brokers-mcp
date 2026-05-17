@@ -24,6 +24,7 @@ import {
   GetScannerParamsInput,
   RunScannerInput,
   GetOptionsChainInput,
+  PlaceOrdersAdvancedInput,
   CancelOrderInput,
   ModifyOrderInput,
   PreviewOrderInput,
@@ -836,11 +837,25 @@ export class ToolHandlers {
         filters.push({ code: "optionType", value: input.optionTypeFilter });
       }
 
+      // IBKR's /iserver/scanner/run expects secType to match the instrument.
+      // The original code hardcoded "OPT", which silently broke equity scans
+      // (instrument=STK with secType=OPT returns empty results). Derive secType
+      // from the instrument value the caller provided.
+      const secTypeByInstrument: Record<string, string> = {
+        OPT: "OPT",
+        STK: "STK",
+        FUT: "FUT",
+        FOP: "FOP",
+        IND: "IND",
+        BOND: "BOND",
+        WAR: "WAR",
+      };
+
       const body = {
         instrument: input.instrument,
         locationCode: input.locationCode,
         scanCode: input.scanCode,
-        secType: "OPT",
+        secType: secTypeByInstrument[input.instrument] || input.instrument,
         numberOfRows: Math.min(input.numberOfRows, 50),
         filters,
       };
@@ -934,6 +949,16 @@ export class ToolHandlers {
   }
 
   // ── Order Lifecycle Methods ─────────────────────────────────────────────────
+
+  async placeOrdersAdvanced(input: PlaceOrdersAdvancedInput): Promise<ToolHandlerResult> {
+    return this.runTool(() =>
+      this.context.ibClient.placeOrdersAdvanced(
+        input.accountId,
+        input.orders as any[],
+        input.suppressConfirmations
+      )
+    );
+  }
 
   async cancelOrder(input: CancelOrderInput): Promise<ToolHandlerResult> {
     try {

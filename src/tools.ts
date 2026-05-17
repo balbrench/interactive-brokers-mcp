@@ -21,6 +21,7 @@ import {
   GetScannerParamsZodShape,
   RunScannerZodShape,
   GetOptionsChainZodShape,
+  PlaceOrdersAdvancedZodShape,
   CancelOrderZodShape,
   ModifyOrderZodShape,
   PreviewOrderZodShape,
@@ -119,13 +120,32 @@ export function registerTools(
   if (!userConfig?.IB_READ_ONLY_MODE) {
     server.tool(
       "place_order",
-      "Place a trading order. Examples:\n" +
+      "Place a single-leg trading order. Supported orderTypes: MKT, LMT, STP, STP_LIMIT, " +
+      "TRAIL, TRAILLMT, MIDPRICE, MOC, LOC. " +
+      "Examples:\n" +
       "- Market buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
       "- Limit sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`\n" +
       "- Stop sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"STP\",\"quantity\":1,\"stopPrice\":180 }`\n" +
-      "- Suppress confirmations: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1,\"suppressConfirmations\":true }`",
+      "- Stop-limit: `{ ...,\"orderType\":\"STP_LIMIT\",\"price\":179.5,\"stopPrice\":180 }`\n" +
+      "- Trailing stop: `{ ...,\"orderType\":\"TRAIL\",\"trailingAmt\":1.5,\"trailingType\":\"amt\" }`\n" +
+      "- Adaptive routing / outside-RTH: `{ ...,\"useAdaptive\":true,\"outsideRTH\":true }`\n" +
+      "- Bracket child: pass `parentId` of the parent order on this leg\n" +
+      "- Suppress confirmations: `{ ...,\"suppressConfirmations\":true }`",
       PlaceOrderZodShape,
       async (args) => await handlers.placeOrder(args)
+    );
+
+    server.tool(
+      "place_orders_advanced",
+      "Submit one or more pre-built orders directly to /iserver/account/{id}/orders. " +
+      "Use this for bracket orders (parent + children linked via `parentId`), OCA groups (`ocaGroup`), " +
+      "and combo / multi-leg orders. Each order must include `conid` (numeric) and IBKR-shaped fields " +
+      "(`side`, `orderType`, `quantity`, optional `price`, `auxPrice`, `trailingAmt`/`trailingType`, " +
+      "`outsideRTH`, `parentId`, `cOID`, `ocaGroup`, `useAdaptive`, `secType`, `conidex`). " +
+      "Up to 20 orders per call. " +
+      "Usage: `{ \"accountId\":\"abc\",\"orders\":[{ \"conid\":265598,\"side\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":100,\"price\":185 }] }`.",
+      PlaceOrdersAdvancedZodShape,
+      async (args) => await handlers.placeOrdersAdvanced(args)
     );
   }
 

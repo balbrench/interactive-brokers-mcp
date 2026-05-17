@@ -146,6 +146,67 @@ describe('Tool Definitions - Zod Schemas', () => {
       expect(result.success).toBe(false);
     });
 
+    it('should require both price and stopPrice for STP_LIMIT', () => {
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'STP_LIMIT',
+          quantity: 10,
+        }).success
+      ).toBe(false);
+
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'STP_LIMIT',
+          quantity: 10,
+          price: 179,
+          stopPrice: 180,
+        }).success
+      ).toBe(true);
+    });
+
+    it('should require trailingAmt for TRAIL', () => {
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'TRAIL',
+          quantity: 10,
+        }).success
+      ).toBe(false);
+
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'TRAIL',
+          quantity: 10,
+          trailingAmt: 1.5,
+          trailingType: 'amt',
+        }).success
+      ).toBe(true);
+    });
+
+    it('should accept MIDPRICE / MOC without extra fields', () => {
+      for (const orderType of ['MIDPRICE', 'MOC'] as const) {
+        const result = PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'BUY',
+          orderType,
+          quantity: 10,
+        });
+        expect(result.success).toBe(true);
+      }
+    });
+
     it('should accept valid STP order with stopPrice', () => {
       const validOrder = {
         accountId: 'U12345',

@@ -39,6 +39,7 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).toContain('delete_alert');
         expect(registeredTools).toContain('cancel_order');
         expect(registeredTools).toContain('modify_order');
+        expect(registeredTools).toContain('place_orders_advanced');
         expect(registeredTools).toContain('suppress_questions');
         expect(registeredTools).toContain('reset_question_suppression');
         expect(registeredTools).toContain('create_watchlist');
@@ -84,6 +85,7 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).not.toContain('delete_alert');
         expect(registeredTools).not.toContain('cancel_order');
         expect(registeredTools).not.toContain('modify_order');
+        expect(registeredTools).not.toContain('place_orders_advanced');
         expect(registeredTools).not.toContain('suppress_questions');
         expect(registeredTools).not.toContain('reset_question_suppression');
         expect(registeredTools).not.toContain('create_watchlist');
