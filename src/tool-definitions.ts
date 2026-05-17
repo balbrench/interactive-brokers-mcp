@@ -95,6 +95,33 @@ export const DeleteAlertZodShape = {
   alertId: z.string()
 };
 
+// Scanner Zod Shapes
+export const GetScannerParamsZodShape = {
+  confirm: z.literal(true)
+};
+
+export const RunScannerZodShape = {
+  scanCode: z.string(),
+  instrument: z.string().default("OPT"),
+  locationCode: z.string().default("OPT.US.MAJOR"),
+  numberOfRows: z.number().int().positive().max(50).default(25),
+  abovePrice: z.number().optional(),
+  belowPrice: z.number().optional(),
+  aboveVolume: z.number().optional(),
+  optionTypeFilter: z.enum(["CALL", "PUT", "ALL"]).default("ALL")
+};
+
+// Options Chain Zod Shape
+export const GetOptionsChainZodShape = {
+  symbol: z.string(),
+  exchange: z.string().default("SMART"),
+  expiration: z.string().regex(/^[0-9]{6}$/, "expiration must be YYYYMM").optional(),
+  strike: z.number().optional(),
+  optionType: z.enum(["C", "P"]).optional(),
+  minOpenInterest: z.number().optional(),
+  minVolume: z.number().optional()
+};
+
 // Flex Query Zod Shapes
 export const GetFlexQueryZodShape = {
   queryId: z.string(),
@@ -149,6 +176,13 @@ export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
 
 export const DeleteAlertZodSchema = z.object(DeleteAlertZodShape);
 
+// Scanner Full Schemas
+export const GetScannerParamsZodSchema = z.object(GetScannerParamsZodShape);
+export const RunScannerZodSchema = z.object(RunScannerZodShape);
+
+// Options Chain Full Schema
+export const GetOptionsChainZodSchema = z.object(GetOptionsChainZodShape);
+
 // Flex Query Full Schemas
 export const GetFlexQueryZodSchema = z.object(GetFlexQueryZodShape);
 
@@ -172,3 +206,6 @@ export type DeleteAlertInput = z.infer<typeof DeleteAlertZodSchema>;
 export type GetFlexQueryInput = z.infer<typeof GetFlexQueryZodSchema>;
 export type ListFlexQueriesInput = z.infer<typeof ListFlexQueriesZodSchema>;
 export type ForgetFlexQueryInput = z.infer<typeof ForgetFlexQueryZodSchema>;
+export type GetScannerParamsInput = z.infer<typeof GetScannerParamsZodSchema>;
+export type RunScannerInput = z.infer<typeof RunScannerZodSchema>;
+export type GetOptionsChainInput = z.infer<typeof GetOptionsChainZodSchema>;

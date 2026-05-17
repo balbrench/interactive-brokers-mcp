@@ -17,7 +17,10 @@ import {
   DeleteAlertZodShape,
   GetFlexQueryZodShape,
   ListFlexQueriesZodShape,
-  ForgetFlexQueryZodShape
+  ForgetFlexQueryZodShape,
+  GetScannerParamsZodShape,
+  RunScannerZodShape,
+  GetOptionsChainZodShape
 } from "./tool-definitions.js";
 
 export function registerTools(
@@ -148,6 +151,39 @@ export function registerTools(
       async (args) => await handlers.deleteAlert(args)
     );
   }
+
+  // Register get_scanner_params tool
+  server.tool(
+    "get_scanner_params",
+    "Fetch the available IBKR scanner types, instruments, location codes, and filter codes. " +
+    "Use this to discover valid `scanCode`, `instrument`, and `locationCode` values for `run_scanner`. " +
+    "Usage: `{ \"confirm\": true }`.",
+    GetScannerParamsZodShape,
+    async (args) => await handlers.getScannerParams(args)
+  );
+
+  // Register run_scanner tool
+  server.tool(
+    "run_scanner",
+    "Run an IBKR market scanner. Defaults to scanning US options (instrument=OPT, locationCode=OPT.US.MAJOR). " +
+    "Useful scan codes for options: `OPT_VOLUME_MOST_ACTIVE`, `OPT_OPEN_INTEREST_MOST_ACTIVE`, " +
+    "`TOP_OPT_IMP_VOLAT_GAIN`, `HOT_OPT_VOLUME_STKS`, `OPT_UNUSUAL_VOLUME`. " +
+    "Optional filters: `abovePrice`, `belowPrice`, `aboveVolume`, `optionTypeFilter` (`CALL`|`PUT`|`ALL`). " +
+    "Usage: `{ \"scanCode\": \"OPT_VOLUME_MOST_ACTIVE\", \"numberOfRows\": 25 }`.",
+    RunScannerZodShape,
+    async (args) => await handlers.runScanner(args)
+  );
+
+  // Register get_options_chain tool
+  server.tool(
+    "get_options_chain",
+    "Fetch the options chain for a symbol. Resolves the underlying conid, then fetches strikes/expirations. " +
+    "Optional filters: `expiration` (YYYYMM), `strike`, `optionType` (`C`|`P`), `minOpenInterest`, `minVolume`. " +
+    "When `strike` or `optionType` is provided, contract details are also returned. " +
+    "Usage: `{ \"symbol\": \"AAPL\" }` or `{ \"symbol\": \"AAPL\", \"expiration\": \"202506\", \"optionType\": \"C\", \"minOpenInterest\": 100 }`.",
+    GetOptionsChainZodShape,
+    async (args) => await handlers.getOptionsChain(args)
+  );
 
   // Register Flex Query tools (only if token is configured)
   if (userConfig?.IB_FLEX_TOKEN) {

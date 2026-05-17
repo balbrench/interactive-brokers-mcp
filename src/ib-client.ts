@@ -847,6 +847,102 @@ export class IBClient {
     }
   }
 
+  async getScannerParams(): Promise<any> {
+    try {
+      const response = await this.client.get("/iserver/scanner/params");
+      return response.data;
+    } catch (error) {
+      Logger.error("[SCANNER] Failed to get scanner params:", error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error("Authentication required to retrieve scanner params. Please authenticate with Interactive Brokers first.");
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      throw new Error("Failed to retrieve scanner params");
+    }
+  }
+
+  async runScanner(body: Record<string, any>): Promise<any> {
+    try {
+      const response = await this.client.post("/iserver/scanner/run", body);
+      return response.data;
+    } catch (error) {
+      Logger.error("[SCANNER] Failed to run scanner:", error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error("Authentication required to run scanner. Please authenticate with Interactive Brokers first.");
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      throw new Error("Failed to run scanner");
+    }
+  }
+
+  async getOptionsChain(input: {
+    symbol: string;
+    exchange: string;
+    expiration?: string;
+    strike?: number;
+    optionType?: "C" | "P";
+  }): Promise<any> {
+    try {
+      const searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(input.symbol)}&secType=STK`;
+      const searchResponse = await this.client.get(searchUrl);
+
+      if (!searchResponse.data || searchResponse.data.length === 0) {
+        throw new SymbolNotFoundError(`Symbol ${input.symbol} not found`);
+      }
+
+      const underlying = searchResponse.data[0];
+      const conid = underlying.conid;
+
+      const strikesParams = new URLSearchParams({
+        conid: String(conid),
+        sectype: "OPT",
+        exchange: input.exchange,
+      });
+      if (input.expiration) {
+        strikesParams.set("month", input.expiration);
+      }
+      const strikesResponse = await this.client.get(`/iserver/secdef/strikes?${strikesParams.toString()}`);
+      const strikes = strikesResponse.data;
+
+      const result: any = {
+        underlying: {
+          symbol: input.symbol,
+          conid,
+          name: underlying.companyName || underlying.name,
+        },
+        strikes,
+      };
+
+      if (input.strike !== undefined || input.optionType !== undefined) {
+        const infoParams = new URLSearchParams({
+          conid: String(conid),
+          sectype: "OPT",
+        });
+        if (input.expiration) infoParams.set("month", input.expiration);
+        if (input.strike !== undefined) infoParams.set("strike", String(input.strike));
+        if (input.optionType) infoParams.set("right", input.optionType);
+
+        const infoResponse = await this.client.get(`/iserver/secdef/info?${infoParams.toString()}`);
+        result.contracts = infoResponse.data;
+      }
+
+      return result;
+    } catch (error) {
+      Logger.error("[OPTIONS-CHAIN] Failed to get options chain:", error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error(`Authentication required to retrieve options chain for ${input.symbol}. Please authenticate with Interactive Brokers first.`);
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      if (error instanceof SymbolNotFoundError) {
+        throw error;
+      }
+      throw new Error(`Failed to retrieve options chain for ${input.symbol}`);
+    }
+  }
+
   /**
    * Get all alerts for an account
    * @param accountId The account ID
