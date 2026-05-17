@@ -21,6 +21,9 @@ import {
   GetFlexQueryInput,
   ListFlexQueriesInput,
   ForgetFlexQueryInput,
+  GetScannerParamsInput,
+  RunScannerInput,
+  GetOptionsChainInput,
 } from "./tool-definitions.js";
 
 export interface ToolHandlerContext {
@@ -720,6 +723,137 @@ export class ToolHandlers {
       }
       
       const result = await this.context.ibClient.deleteAlert(input.accountId, input.alertId);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: this.formatError(error),
+          },
+        ],
+      };
+    }
+  }
+
+  // ── Scanner & Options Chain Methods ─────────────────────────────────────────
+
+  async getScannerParams(input: GetScannerParamsInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+
+      const result = await this.context.ibClient.getScannerParams();
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: this.formatError(error),
+          },
+        ],
+      };
+    }
+  }
+
+  async runScanner(input: RunScannerInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+
+      const filters: Array<{ code: string; value: number | string }> = [];
+      if (input.abovePrice !== undefined) {
+        filters.push({ code: "priceAbove", value: input.abovePrice });
+      }
+      if (input.belowPrice !== undefined) {
+        filters.push({ code: "priceBelow", value: input.belowPrice });
+      }
+      if (input.aboveVolume !== undefined) {
+        filters.push({ code: "volumeAbove", value: input.aboveVolume });
+      }
+      if (input.optionTypeFilter !== "ALL") {
+        filters.push({ code: "optionType", value: input.optionTypeFilter });
+      }
+
+      const body = {
+        instrument: input.instrument,
+        locationCode: input.locationCode,
+        scanCode: input.scanCode,
+        secType: "OPT",
+        numberOfRows: Math.min(input.numberOfRows, 50),
+        filters,
+      };
+
+      const result = await this.context.ibClient.runScanner(body);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: this.formatError(error),
+          },
+        ],
+      };
+    }
+  }
+
+  async getOptionsChain(input: GetOptionsChainInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+
+      const result = await this.context.ibClient.getOptionsChain({
+        symbol: input.symbol,
+        exchange: input.exchange,
+        expiration: input.expiration,
+        strike: input.strike,
+        optionType: input.optionType,
+      });
+
+      if (
+        Array.isArray(result.contracts) &&
+        (input.minOpenInterest !== undefined || input.minVolume !== undefined)
+      ) {
+        result.contracts = result.contracts.filter((c: any) => {
+          if (input.minOpenInterest !== undefined && (c.openInterest ?? 0) < input.minOpenInterest) {
+            return false;
+          }
+          if (input.minVolume !== undefined && (c.volume ?? 0) < input.minVolume) {
+            return false;
+          }
+          return true;
+        });
+      }
+
       return {
         content: [
           {

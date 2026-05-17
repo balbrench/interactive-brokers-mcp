@@ -201,6 +201,14 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | `get_order_status` | Check order execution status              |
 | `get_live_orders`  | Get all live/open orders for monitoring   |
 
+### Market Scanners & Options Chains
+
+| Tool                  | Description                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| `get_scanner_params`  | Fetch available IBKR scanner types, instruments, location codes, and filter codes                 |
+| `run_scanner`         | Run an IBKR market scanner (e.g. `OPT_VOLUME_MOST_ACTIVE`, `OPT_UNUSUAL_VOLUME`) with optional price/volume/option-type filters |
+| `get_options_chain`   | Fetch the options chain for a symbol, with optional filters for expiration, strike, type, open interest, and volume |
+
 ### Flex Queries (Requires IB_FLEX_TOKEN)
 
 | Tool                | Description                                                          |
