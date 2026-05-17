@@ -41,11 +41,24 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).toContain('modify_order');
         expect(registeredTools).toContain('suppress_questions');
         expect(registeredTools).toContain('reset_question_suppression');
+        expect(registeredTools).toContain('create_watchlist');
+        expect(registeredTools).toContain('delete_watchlist');
+        expect(registeredTools).toContain('mark_fyi_read');
+        expect(registeredTools).toContain('update_fyi_settings');
+        expect(registeredTools).toContain('set_active_account');
+        expect(registeredTools).toContain('logout');
 
         // Verify read tools are also registered
         expect(registeredTools).toContain('get_positions');
         expect(registeredTools).toContain('get_market_data');
         expect(registeredTools).toContain('preview_order');
+        expect(registeredTools).toContain('get_historical_data');
+        expect(registeredTools).toContain('get_pnl');
+        expect(registeredTools).toContain('get_trades');
+        expect(registeredTools).toContain('get_account_ledger');
+        expect(registeredTools).toContain('list_watchlists');
+        expect(registeredTools).toContain('get_news_portfolio');
+        expect(registeredTools).toContain('get_entity_info');
     });
 
     it('should register ALL tools when read-only mode is EXPLICITLY FALSE', () => {
@@ -73,6 +86,12 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).not.toContain('modify_order');
         expect(registeredTools).not.toContain('suppress_questions');
         expect(registeredTools).not.toContain('reset_question_suppression');
+        expect(registeredTools).not.toContain('create_watchlist');
+        expect(registeredTools).not.toContain('delete_watchlist');
+        expect(registeredTools).not.toContain('mark_fyi_read');
+        expect(registeredTools).not.toContain('update_fyi_settings');
+        expect(registeredTools).not.toContain('set_active_account');
+        expect(registeredTools).not.toContain('logout');
 
         // Verify read tools ARE registered
         expect(registeredTools).toContain('get_positions');
@@ -83,5 +102,11 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).toContain('get_alerts');
         // preview_order is no-trading by design and remains available even when read-only.
         expect(registeredTools).toContain('preview_order');
+        expect(registeredTools).toContain('get_historical_data');
+        expect(registeredTools).toContain('get_pnl');
+        expect(registeredTools).toContain('list_watchlists');
+        expect(registeredTools).toContain('get_news_portfolio');
+        expect(registeredTools).toContain('get_fyi_notifications');
+        expect(registeredTools).toContain('get_entity_info');
     });
 });

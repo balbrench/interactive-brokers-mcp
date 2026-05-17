@@ -829,6 +829,241 @@ describe('IBClient', () => {
     });
   });
 
+  describe('Market Data Extensions', () => {
+    it('getHistoricalData should pass conid, period, bar via query string', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: { bars: [] } });
+
+      await client.getHistoricalData({ conid: 265598, period: '5d', bar: '30min', outsideRTH: true });
+
+      const url = (mockClient.get as any).mock.calls[0][0];
+      expect(url).toContain('conid=265598');
+      expect(url).toContain('period=5d');
+      expect(url).toContain('bar=30min');
+      expect(url).toContain('outsideRth=true');
+    });
+
+    it('unsubscribeMarketData should call the per-conid endpoint', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: { success: true } });
+      const result = await client.unsubscribeMarketData(265598);
+      expect(mockClient.get).toHaveBeenCalledWith('/iserver/marketdata/265598/unsubscribe');
+      expect(result.success).toBe(true);
+    });
+
+    it('unsubscribeAllMarketData should hit unsubscribeall', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: { success: true } });
+      await client.unsubscribeAllMarketData();
+      expect(mockClient.get).toHaveBeenCalledWith('/iserver/marketdata/unsubscribeall');
+    });
+
+    it('getMarketDataSnapshot should batch conids and retry on empty warmup response', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      // First call: response without numeric field keys.
+      mockClient.get
+        .mockResolvedValueOnce({ data: [{ conid: 1, server_id: 'x' }] })
+        // Second call: has a numeric field key — should stop.
+        .mockResolvedValueOnce({ data: [{ conid: 1, '31': '150.25' }] });
+
+      const result = await client.getMarketDataSnapshot([1, 2], '31,84', 3, 1);
+      const firstUrl = (mockClient.get as any).mock.calls[0][0];
+      expect(firstUrl).toContain('conids=1%2C2');
+      expect(firstUrl).toContain('fields=31%2C84');
+      expect(mockClient.get).toHaveBeenCalledTimes(2);
+      expect(result[0]['31']).toBe('150.25');
+    });
+  });
+
+  describe('Portfolio Extensions', () => {
+    it('getAllPositions should paginate until an empty page is returned', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      // Page 0: 30 rows -> keep going. Page 1: 5 rows -> stop (less than page size).
+      const page0 = Array.from({ length: 30 }, (_, i) => ({ conid: i + 1 }));
+      const page1 = [{ conid: 31 }, { conid: 32 }];
+
+      mockClient.get
+        .mockResolvedValueOnce({ data: page0 })
+        .mockResolvedValueOnce({ data: page1 });
+
+      const result = await client.getAllPositions('U12345');
+      expect(mockClient.get).toHaveBeenNthCalledWith(1, '/portfolio/U12345/positions/0');
+      expect(mockClient.get).toHaveBeenNthCalledWith(2, '/portfolio/U12345/positions/1');
+      expect(result).toHaveLength(32);
+    });
+
+    it('getAccountLedger / getAccountAllocation / getAccountMeta hit the right paths', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get
+        .mockResolvedValueOnce({ data: { BASE: { cashbalance: 100 } } })
+        .mockResolvedValueOnce({ data: { assetClass: {} } })
+        .mockResolvedValueOnce({ data: { type: 'INDIVIDUAL' } });
+
+      await client.getAccountLedger('U1');
+      await client.getAccountAllocation('U1');
+      await client.getAccountMeta('U1');
+
+      expect(mockClient.get).toHaveBeenNthCalledWith(1, '/portfolio/U1/ledger');
+      expect(mockClient.get).toHaveBeenNthCalledWith(2, '/portfolio/U1/allocation');
+      expect(mockClient.get).toHaveBeenNthCalledWith(3, '/portfolio/U1/meta');
+    });
+
+    it('getConsolidatedAllocation POSTs acctIds', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValueOnce({ data: {} });
+      await client.getConsolidatedAllocation(['U1', 'U2']);
+      expect(mockClient.post).toHaveBeenCalledWith('/portfolio/allocation', { acctIds: ['U1', 'U2'] });
+    });
+
+    it('getPnl hits the partitioned PnL endpoint', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: { upnl: {} } });
+      await client.getPnl();
+      expect(mockClient.get).toHaveBeenCalledWith('/iserver/account/pnl/partitioned');
+    });
+
+    it('getTrades omits the days param when not provided', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: [] });
+      await client.getTrades();
+      expect(mockClient.get).toHaveBeenCalledWith('/iserver/account/trades');
+    });
+
+    it('getTrades includes the days query when provided', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({ data: [] });
+      await client.getTrades(5);
+      expect(mockClient.get).toHaveBeenCalledWith('/iserver/account/trades?days=5');
+    });
+
+    it('performance + summary + transaction analytics each POST the correct body', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValue({ data: {} });
+
+      await client.getPerformance(['U1'], '1Y');
+      await client.getPerformanceSummary(['U1', 'U2']);
+      await client.getTransactionAnalytics({ acctIds: ['U1'], conids: [265598, '76792991'], days: 30, currency: 'USD' });
+
+      expect(mockClient.post).toHaveBeenNthCalledWith(1, '/pa/performance', { acctIds: ['U1'], period: '1Y' });
+      expect(mockClient.post).toHaveBeenNthCalledWith(2, '/pa/summary', { acctIds: ['U1', 'U2'] });
+      expect(mockClient.post).toHaveBeenNthCalledWith(3, '/pa/transactions', {
+        acctIds: ['U1'],
+        conids: [265598, 76792991],
+        days: 30,
+        currency: 'USD',
+      });
+    });
+  });
+
+  describe('Contracts Extensions', () => {
+    it('getContractInfo / getSecdefByConid / getFuturesBySymbol / getStocksBySymbol hit the right paths', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get
+        .mockResolvedValueOnce({ data: { conid: 265598 } })
+        .mockResolvedValueOnce({ data: [{ conid: 1 }] })
+        .mockResolvedValueOnce({ data: [{ conid: 2 }] });
+      mockClient.post.mockResolvedValueOnce({ data: [] });
+
+      await client.getContractInfo(265598);
+      await client.getSecdefByConid([265598, '76792991']);
+      await client.getFuturesBySymbol(['ES', 'NQ']);
+      await client.getStocksBySymbol(['AAPL', 'MSFT']);
+
+      expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/contract/265598/info');
+      expect(mockClient.post).toHaveBeenCalledWith('/trsrv/secdef', { conids: [265598, 76792991] });
+      expect(mockClient.get).toHaveBeenNthCalledWith(2, '/trsrv/futures?symbols=ES%2CNQ');
+      expect(mockClient.get).toHaveBeenNthCalledWith(3, '/trsrv/stocks?symbols=AAPL%2CMSFT');
+    });
+
+    it('searchContracts applies the client-side exchange filter', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValueOnce({
+        data: [
+          { conid: 1, symbol: 'AAPL', description: 'NYSE' },
+          { conid: 2, symbol: 'AAPL', description: 'NASDAQ' },
+        ],
+      });
+
+      const result = await client.searchContracts({ symbol: 'AAPL', secType: 'STK', exchange: 'NASDAQ' });
+
+      const url = (mockClient.get as any).mock.calls[0][0];
+      expect(url).toContain('symbol=AAPL');
+      expect(url).toContain('secType=STK');
+      expect(result).toHaveLength(1);
+      expect(result[0].conid).toBe(2);
+    });
+  });
+
+  describe('Watchlists / News / FYI / Session Extensions', () => {
+    it('watchlist CRUD endpoints map correctly', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValue({ data: [] });
+      mockClient.post.mockResolvedValue({ data: { id: '123' } });
+      mockClient.delete = vi.fn().mockResolvedValue({ data: { deleted: true } });
+
+      await client.listWatchlists();
+      await client.getWatchlist('123');
+      await client.createWatchlist('123', 'Tech', [265598, '76792991']);
+      await client.deleteWatchlist('123');
+
+      expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/watchlists');
+      expect(mockClient.get).toHaveBeenNthCalledWith(2, '/iserver/watchlist?id=123');
+      expect(mockClient.post).toHaveBeenCalledWith('/iserver/watchlist', {
+        id: '123',
+        name: 'Tech',
+        rows: [{ C: 265598 }, { C: 76792991 }],
+      });
+      expect(mockClient.delete).toHaveBeenCalledWith('/iserver/watchlist?id=123');
+    });
+
+    it('news endpoints map correctly', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValue({ data: [] });
+      await client.getNewsPortfolio();
+      await client.getNewsTop();
+      await client.getNewsArticle('BRFG$abc');
+      expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/news/portfolio');
+      expect(mockClient.get).toHaveBeenNthCalledWith(2, '/iserver/news/top');
+      expect(mockClient.get).toHaveBeenNthCalledWith(3, '/news/articles/BRFG%24abc');
+    });
+
+    it('fyi endpoints map correctly', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get.mockResolvedValue({ data: [] });
+      mockClient.put = vi.fn().mockResolvedValue({ data: { ok: true } });
+      mockClient.post.mockResolvedValue({ data: { ok: true } });
+
+      await client.getFyiNotifications();
+      await client.getFyiNotifications(20);
+      await client.getFyiUnreadCount();
+      await client.getFyiSettings();
+      await client.markFyiRead('abc');
+      await client.updateFyiSettings('MA', true);
+
+      expect(mockClient.get).toHaveBeenNthCalledWith(1, '/fyi/notifications');
+      expect(mockClient.get).toHaveBeenNthCalledWith(2, '/fyi/notifications?max=20');
+      expect(mockClient.get).toHaveBeenNthCalledWith(3, '/fyi/unreadnumber');
+      expect(mockClient.get).toHaveBeenNthCalledWith(4, '/fyi/settings');
+      expect(mockClient.put).toHaveBeenCalledWith('/fyi/notifications/abc');
+      expect(mockClient.post).toHaveBeenCalledWith('/fyi/settings/MA', { enabled: true });
+    });
+
+    it('session endpoints map correctly', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValue({ data: { ok: true } });
+      mockClient.get.mockResolvedValueOnce({ data: { entity: {} } });
+
+      await client.setActiveAccount('U12345');
+      await client.getEntityInfo();
+      // logout flips internal state — verify the call still hits the right path.
+      await client.logout();
+
+      expect(mockClient.post).toHaveBeenCalledWith('/iserver/account', { acctId: 'U12345' });
+      expect(mockClient.get).toHaveBeenCalledWith('/ibcust/entity/info');
+      expect(mockClient.post).toHaveBeenCalledWith('/logout');
+    });
+  });
+
   describe('isAuthenticationError', () => {
     it('should not treat HTTP 500 with a non-auth body as an authentication error', async () => {
       // Simulate getOrderStatus failing with a 500 from a genuinely-broken upstream.

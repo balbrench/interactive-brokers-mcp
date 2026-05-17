@@ -1183,4 +1183,328 @@ export class IBClient {
       throw new Error("Failed to delete alert: " + (error as any).message);
     }
   }
+
+  // ── Market Data ───────────────────────────────────────────────────────────
+
+  /**
+   * Historical OHLCV bars.
+   * GET /iserver/marketdata/history
+   */
+  async getHistoricalData(params: {
+    conid: number | string;
+    period: string;
+    bar: string;
+    exchange?: string;
+    outsideRTH?: boolean;
+    source?: string;
+    startTime?: string;
+  }): Promise<any> {
+    const search = new URLSearchParams();
+    search.set("conid", String(params.conid));
+    search.set("period", params.period);
+    search.set("bar", params.bar);
+    if (params.exchange) search.set("exchange", params.exchange);
+    if (params.outsideRTH !== undefined) search.set("outsideRth", String(params.outsideRTH));
+    if (params.source) search.set("source", params.source);
+    if (params.startTime) search.set("startTime", params.startTime);
+
+    return this.apiCall(`get historical data for conid ${params.conid}`, () =>
+      this.client.get(`/iserver/marketdata/history?${search.toString()}`)
+    );
+  }
+
+  /** GET /iserver/marketdata/{conid}/unsubscribe */
+  async unsubscribeMarketData(conid: number | string): Promise<any> {
+    return this.apiCall(`unsubscribe market data for conid ${conid}`, () =>
+      this.client.get(`/iserver/marketdata/${conid}/unsubscribe`)
+    );
+  }
+
+  /** GET /iserver/marketdata/unsubscribeall */
+  async unsubscribeAllMarketData(): Promise<any> {
+    return this.apiCall(`unsubscribe all market data`, () =>
+      this.client.get(`/iserver/marketdata/unsubscribeall`)
+    );
+  }
+
+  /**
+   * Batch snapshot for a list of conids and fields.
+   * GET /iserver/marketdata/snapshot?conids=...&fields=...
+   * IBKR may require multiple calls before data is populated; this method
+   * accepts an optional `warmupAttempts` and `warmupDelayMs` to retry until
+   * the response has live values for at least one conid.
+   */
+  async getMarketDataSnapshot(
+    conids: Array<number | string>,
+    fields: string,
+    warmupAttempts = 1,
+    warmupDelayMs = 500
+  ): Promise<any> {
+    const search = new URLSearchParams();
+    search.set("conids", conids.join(","));
+    search.set("fields", fields);
+    const url = `/iserver/marketdata/snapshot?${search.toString()}`;
+
+    let lastData: any;
+    for (let attempt = 0; attempt < Math.max(1, warmupAttempts); attempt++) {
+      const data = await this.apiCall(`get market data snapshot`, () => this.client.get(url));
+      lastData = data;
+      const hasFields = Array.isArray(data) && data.some((row: any) =>
+        Object.keys(row || {}).some((k) => /^\d+$/.test(k))
+      );
+      if (hasFields) return data;
+      if (attempt < warmupAttempts - 1) {
+        await new Promise((r) => setTimeout(r, warmupDelayMs));
+      }
+    }
+    return lastData;
+  }
+
+  // ── Portfolio & Analytics ─────────────────────────────────────────────────
+
+  /** GET /portfolio/{accountId}/ledger */
+  async getAccountLedger(accountId: string): Promise<any> {
+    return this.apiCall(`get account ledger for ${accountId}`, () =>
+      this.client.get(`/portfolio/${accountId}/ledger`)
+    );
+  }
+
+  /** GET /portfolio/{accountId}/allocation */
+  async getAccountAllocation(accountId: string): Promise<any> {
+    return this.apiCall(`get account allocation for ${accountId}`, () =>
+      this.client.get(`/portfolio/${accountId}/allocation`)
+    );
+  }
+
+  /** POST /portfolio/allocation — consolidated allocation across accounts */
+  async getConsolidatedAllocation(accountIds: string[]): Promise<any> {
+    return this.apiCall(`get consolidated allocation`, () =>
+      this.client.post(`/portfolio/allocation`, { acctIds: accountIds })
+    );
+  }
+
+  /** GET /portfolio/{accountId}/meta */
+  async getAccountMeta(accountId: string): Promise<any> {
+    return this.apiCall(`get account meta for ${accountId}`, () =>
+      this.client.get(`/portfolio/${accountId}/meta`)
+    );
+  }
+
+  /** GET /portfolio/subaccounts */
+  async getSubaccounts(): Promise<any> {
+    return this.apiCall(`get subaccounts`, () => this.client.get(`/portfolio/subaccounts`));
+  }
+
+  /** GET /iserver/account/pnl/partitioned */
+  async getPnl(): Promise<any> {
+    return this.apiCall(`get PnL`, () => this.client.get(`/iserver/account/pnl/partitioned`));
+  }
+
+  /** GET /iserver/account/trades — today's plus up to 6 prior days */
+  async getTrades(days?: number): Promise<any> {
+    const url = days ? `/iserver/account/trades?days=${encodeURIComponent(String(days))}` : `/iserver/account/trades`;
+    return this.apiCall(`get trades`, () => this.client.get(url));
+  }
+
+  /**
+   * Walk every page of /portfolio/{accountId}/positions/{pageId}.
+   * IBKR returns 30 rows per page; this iterates until the page is empty.
+   * pageSize is enforced server-side (30) — `maxPages` is a safety cap.
+   */
+  async getAllPositions(accountId: string, maxPages = 50): Promise<any[]> {
+    const all: any[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const data = await this.apiCall(`get positions page ${page} for ${accountId}`, () =>
+        this.client.get(`/portfolio/${accountId}/positions/${page}`)
+      );
+      if (!Array.isArray(data) || data.length === 0) break;
+      all.push(...data);
+      if (data.length < 30) break;
+    }
+    return all;
+  }
+
+  /** GET /portfolio/{accountId}/position/{conid} */
+  async getPositionByConid(accountId: string, conid: number | string): Promise<any> {
+    return this.apiCall(`get position for conid ${conid}`, () =>
+      this.client.get(`/portfolio/${accountId}/position/${conid}`)
+    );
+  }
+
+  /** GET /portfolio/positions/{conid} — position across all accounts */
+  async getPositionsAcrossAccounts(conid: number | string): Promise<any> {
+    return this.apiCall(`get positions for conid ${conid} across accounts`, () =>
+      this.client.get(`/portfolio/positions/${conid}`)
+    );
+  }
+
+  /** POST /pa/performance */
+  async getPerformance(accountIds: string[], period?: string): Promise<any> {
+    const body: any = { acctIds: accountIds };
+    if (period) body.period = period;
+    return this.apiCall(`get performance`, () => this.client.post(`/pa/performance`, body));
+  }
+
+  /** POST /pa/summary */
+  async getPerformanceSummary(accountIds: string[]): Promise<any> {
+    return this.apiCall(`get performance summary`, () =>
+      this.client.post(`/pa/summary`, { acctIds: accountIds })
+    );
+  }
+
+  /** POST /pa/transactions */
+  async getTransactionAnalytics(params: { acctIds: string[]; conids: Array<number | string>; days?: number; currency?: string }): Promise<any> {
+    const body: any = { acctIds: params.acctIds, conids: params.conids.map((c) => Number(c)) };
+    if (params.days !== undefined) body.days = params.days;
+    if (params.currency) body.currency = params.currency;
+    return this.apiCall(`get transaction analytics`, () =>
+      this.client.post(`/pa/transactions`, body)
+    );
+  }
+
+  // ── Contracts ─────────────────────────────────────────────────────────────
+
+  /** GET /iserver/contract/{conid}/info */
+  async getContractInfo(conid: number | string): Promise<any> {
+    return this.apiCall(`get contract info for conid ${conid}`, () =>
+      this.client.get(`/iserver/contract/${conid}/info`)
+    );
+  }
+
+  /** POST /trsrv/secdef — security definitions by conid */
+  async getSecdefByConid(conids: Array<number | string>): Promise<any> {
+    return this.apiCall(`get secdef by conid`, () =>
+      this.client.post(`/trsrv/secdef`, { conids: conids.map((c) => Number(c)) })
+    );
+  }
+
+  /** GET /trsrv/futures?symbols=ES,NQ */
+  async getFuturesBySymbol(symbols: string[]): Promise<any> {
+    return this.apiCall(`get futures contracts`, () =>
+      this.client.get(`/trsrv/futures?symbols=${encodeURIComponent(symbols.join(","))}`)
+    );
+  }
+
+  /** GET /trsrv/stocks?symbols=AAPL,MSFT */
+  async getStocksBySymbol(symbols: string[]): Promise<any> {
+    return this.apiCall(`get stock contracts`, () =>
+      this.client.get(`/trsrv/stocks?symbols=${encodeURIComponent(symbols.join(","))}`)
+    );
+  }
+
+  /**
+   * Expose /iserver/secdef/search to users directly with optional secType
+   * and name (company-name search) flags.
+   */
+  async searchContracts(params: { symbol: string; secType?: string; name?: boolean; exchange?: string }): Promise<any> {
+    const search = new URLSearchParams();
+    search.set("symbol", params.symbol);
+    if (params.secType) search.set("secType", params.secType);
+    if (params.name) search.set("name", "true");
+    const url = `/iserver/secdef/search?${search.toString()}`;
+    const data = await this.apiCall<any[]>(`search contracts for ${params.symbol}`, () => this.client.get(url));
+    return this.filterSecdefByExchange(data || [], params.exchange);
+  }
+
+  // ── Watchlists ────────────────────────────────────────────────────────────
+
+  /** GET /iserver/watchlists */
+  async listWatchlists(): Promise<any> {
+    return this.apiCall(`list watchlists`, () => this.client.get(`/iserver/watchlists`));
+  }
+
+  /** GET /iserver/watchlist?id={id} */
+  async getWatchlist(id: string): Promise<any> {
+    return this.apiCall(`get watchlist ${id}`, () =>
+      this.client.get(`/iserver/watchlist?id=${encodeURIComponent(id)}`)
+    );
+  }
+
+  /** POST /iserver/watchlist */
+  async createWatchlist(id: string, name: string, conids: Array<number | string>): Promise<any> {
+    const rows = conids.map((c) => ({ C: Number(c) }));
+    return this.apiCall(`create watchlist ${name}`, () =>
+      this.client.post(`/iserver/watchlist`, { id, name, rows })
+    );
+  }
+
+  /** DELETE /iserver/watchlist?id={id} */
+  async deleteWatchlist(id: string): Promise<any> {
+    return this.apiCall(`delete watchlist ${id}`, () =>
+      this.client.delete(`/iserver/watchlist?id=${encodeURIComponent(id)}`)
+    );
+  }
+
+  // ── News ──────────────────────────────────────────────────────────────────
+
+  /** GET /iserver/news/portfolio */
+  async getNewsPortfolio(): Promise<any> {
+    return this.apiCall(`get portfolio news`, () => this.client.get(`/iserver/news/portfolio`));
+  }
+
+  /** GET /iserver/news/top */
+  async getNewsTop(): Promise<any> {
+    return this.apiCall(`get top news`, () => this.client.get(`/iserver/news/top`));
+  }
+
+  /** GET /news/articles/{articleId} */
+  async getNewsArticle(articleId: string): Promise<any> {
+    return this.apiCall(`get news article ${articleId}`, () =>
+      this.client.get(`/news/articles/${encodeURIComponent(articleId)}`)
+    );
+  }
+
+  // ── FYI Notifications ─────────────────────────────────────────────────────
+
+  /** GET /fyi/notifications?max={n} */
+  async getFyiNotifications(max?: number): Promise<any> {
+    const url = max ? `/fyi/notifications?max=${encodeURIComponent(String(max))}` : `/fyi/notifications`;
+    return this.apiCall(`get FYI notifications`, () => this.client.get(url));
+  }
+
+  /** GET /fyi/unreadnumber */
+  async getFyiUnreadCount(): Promise<any> {
+    return this.apiCall(`get FYI unread count`, () => this.client.get(`/fyi/unreadnumber`));
+  }
+
+  /** PUT /fyi/notifications/{notificationId} */
+  async markFyiRead(notificationId: string): Promise<any> {
+    return this.apiCall(`mark FYI ${notificationId} as read`, () =>
+      this.client.put(`/fyi/notifications/${encodeURIComponent(notificationId)}`)
+    );
+  }
+
+  /** GET /fyi/settings */
+  async getFyiSettings(): Promise<any> {
+    return this.apiCall(`get FYI settings`, () => this.client.get(`/fyi/settings`));
+  }
+
+  /** POST /fyi/settings/{typecode} */
+  async updateFyiSettings(typecode: string, enabled: boolean): Promise<any> {
+    return this.apiCall(`update FYI settings for ${typecode}`, () =>
+      this.client.post(`/fyi/settings/${encodeURIComponent(typecode)}`, { enabled })
+    );
+  }
+
+  // ── Session ───────────────────────────────────────────────────────────────
+
+  /** POST /logout */
+  async logout(): Promise<any> {
+    const result = await this.apiCall(`logout`, () => this.client.post(`/logout`));
+    this.isAuthenticated = false;
+    this.stopTickle();
+    return result;
+  }
+
+  /** POST /iserver/account — select active brokerage account */
+  async setActiveAccount(accountId: string): Promise<any> {
+    return this.apiCall(`set active account to ${accountId}`, () =>
+      this.client.post(`/iserver/account`, { acctId: accountId })
+    );
+  }
+
+  /** GET /ibcust/entity/info */
+  async getEntityInfo(): Promise<any> {
+    return this.apiCall(`get entity info`, () => this.client.get(`/ibcust/entity/info`));
+  }
 }
