@@ -11,17 +11,49 @@ interface IBClientConfig {
   port: number;
 }
 
+type OrderType = "MKT" | "LMT" | "STP" | "STP_LIMIT" | "TRAIL" | "TRAILLMT" | "MIDPRICE" | "MOC" | "LOC";
+
 interface OrderRequest {
   accountId: string;
   symbol: string;
   action: "BUY" | "SELL";
-  orderType: "MKT" | "LMT" | "STP";
+  orderType: OrderType;
   quantity: number;
   price?: number;
   stopPrice?: number;
+  trailingAmt?: number;
+  trailingType?: "amt" | "%";
   suppressConfirmations?: boolean;
   exchange?: string;
   tif?: "DAY" | "GTC" | "IOC" | "OPG";
+  outsideRTH?: boolean;
+  parentId?: string;
+  cOID?: string;
+  ocaGroup?: string;
+  useAdaptive?: boolean;
+  referrer?: string;
+}
+
+export interface RawOrderRequest {
+  conid: number | string;
+  side: "BUY" | "SELL";
+  orderType: OrderType;
+  quantity: number | string;
+  tif?: "DAY" | "GTC" | "IOC" | "OPG";
+  price?: number;
+  auxPrice?: number;
+  trailingAmt?: number;
+  trailingType?: "amt" | "%";
+  exchange?: string;
+  outsideRTH?: boolean;
+  parentId?: string;
+  cOID?: string;
+  ocaGroup?: string;
+  useAdaptive?: boolean;
+  referrer?: string;
+  secType?: string;
+  conidex?: string;
+  [extra: string]: any;
 }
 
 const isError = (error: unknown): error is Error => {
@@ -535,28 +567,26 @@ export class IBClient {
     }
   }
 
-  async getMarketData(symbol: string, exchange?: string): Promise<any> {
+  async getMarketData(symbol: string, exchange?: string, fields?: string): Promise<any> {
     try {
-      // First, get the contract ID for the symbol, optionally filtered by exchange
-      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
-      if (exchange) {
-        searchUrl += `&name=${encodeURIComponent(exchange)}`;
-      }
+      const searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
       const searchResponse = await this.client.get(searchUrl);
 
-      if (!searchResponse.data || searchResponse.data.length === 0) {
+      const results = this.filterSecdefByExchange(searchResponse.data || [], exchange);
+      if (!results || results.length === 0) {
         throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? ' on ' + exchange : ''} not found`);
       }
 
-      const contract = searchResponse.data[0];
+      const contract = results[0];
       const conid = contract.conid;
 
-      // Get market data snapshot
-      // Using corrected field IDs based on IB Client Portal API documentation:
-      // 31=Last Price, 70=Day High, 71=Day Low, 82=Change, 83=Change%, 
-      // 84=Bid, 85=Ask Size, 86=Ask, 87=Volume, 88=Bid Size
+      // Default field set: 31=Last Price, 70=Day High, 71=Day Low, 82=Change,
+      // 83=Change%, 84=Bid, 85=Ask Size, 86=Ask, 87=Volume, 88=Bid Size.
+      // Caller may supply a custom CSV via `fields` to request greeks (7308,7309,
+      // 7310,7311,7607,…) or other tags.
+      const fieldList = fields && fields.length > 0 ? fields : "31,70,71,82,83,84,85,86,87,88";
       const response = await this.client.get(
-        `/iserver/marketdata/snapshot?conids=${conid}&fields=31,70,71,82,83,84,85,86,87,88`
+        `/iserver/marketdata/snapshot?conids=${conid}&fields=${encodeURIComponent(fieldList)}`
       );
 
       return {
@@ -585,68 +615,143 @@ export class IBClient {
 
   private isAuthenticationError(error: any): boolean {
     if (!error) return false;
-    
+
     const errorMessage = error.message || error.toString();
     const errorStatus = error.response?.status;
     const responseData = error.response?.data;
-    
-    // Check for common authentication error patterns
+
+    // Only treat as auth error when the response is explicitly authentication
+    // related. Previously HTTP 500 was treated as auth, which masked genuine
+    // server errors as "please authenticate".
+    const responseErrorText =
+      typeof responseData?.error === "string"
+        ? responseData.error
+        : responseData?.error?.message || "";
+
     return (
       errorStatus === 401 ||
       errorStatus === 403 ||
-      errorStatus === 500 ||  // IB Gateway sometimes returns 500 for auth issues
-      errorMessage.includes("authentication") ||
-      errorMessage.includes("authenticate") ||
-      errorMessage.includes("unauthorized") ||
       errorMessage.includes("not authenticated") ||
-      errorMessage.includes("login") ||
-      responseData?.error?.message?.includes("not authenticated") ||
-      responseData?.error?.message?.includes("authentication") ||
-      // IB Gateway specific patterns
-      responseData?.error === "not authenticated" ||
-      (errorStatus === 500 && responseData?.error?.includes("authentication"))
+      errorMessage.includes("unauthorized") ||
+      responseErrorText.includes("not authenticated") ||
+      responseErrorText.includes("authentication required") ||
+      responseData?.error === "not authenticated"
     );
+  }
+
+  /**
+   * Wrap an IBKR REST call with consistent error handling: classify auth errors
+   * for `isAuthError` propagation, preserve `SymbolNotFoundError`, and surface a
+   * useful `Failed to ...` message that includes the underlying axios body so
+   * callers can act on IBKR's specific error responses.
+   */
+  private async apiCall<T>(opName: string, fn: () => Promise<{ data: T }>): Promise<T> {
+    try {
+      const response = await fn();
+      return response.data;
+    } catch (error) {
+      Logger.error(`Failed to ${opName}:`, error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error(
+          `Authentication required to ${opName}. Please authenticate with Interactive Brokers first.`
+        );
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      if (error instanceof SymbolNotFoundError) {
+        throw error;
+      }
+      const detail =
+        (error as any)?.response?.data?.error ||
+        (error as any)?.response?.data?.message ||
+        (error as any)?.message ||
+        String(error);
+      throw new Error(`Failed to ${opName}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    }
+  }
+
+  /**
+   * Filter `secdef/search` results to the rows that look like a specific exchange.
+   * IBKR `secdef/search` accepts only `symbol`, `secType`, and a `name` boolean
+   * (search by company name). Sending `&name=<exchange>` does not filter by
+   * exchange — it asks the gateway to interpret the query as a company name and
+   * usually returns the same set, so we filter client-side using the response's
+   * `description` field (typically the listing exchange).
+   */
+  private filterSecdefByExchange(results: any[], exchange?: string): any[] {
+    if (!exchange) return results;
+    const target = exchange.toUpperCase();
+    const matches = (results || []).filter((row) => {
+      const desc = String(row?.description || "").toUpperCase();
+      const header = String(row?.companyHeader || "").toUpperCase();
+      if (!desc && !header) return false;
+      return desc.split(/[,/\s]+/).includes(target) || header.includes(` ${target}`) || header.endsWith(target);
+    });
+    // Fallback: if no row matches, return everything so callers can still surface
+    // a sensible error/result instead of an empty list caused by overly strict
+    // matching against IBKR's description formatting.
+    return matches.length > 0 ? matches : results;
   }
 
   async placeOrder(orderRequest: OrderRequest): Promise<any> {
     try {
-      // First, get the contract ID for the symbol, optionally filtered by exchange
-      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
-      if (orderRequest.exchange) {
-        searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
-      }
+      const searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
       const searchResponse = await this.client.get(searchUrl);
 
-      if (!searchResponse.data || searchResponse.data.length === 0) {
+      const results = this.filterSecdefByExchange(searchResponse.data || [], orderRequest.exchange);
+      if (!results || results.length === 0) {
         throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? ' on ' + orderRequest.exchange : ''} not found`);
       }
 
-      const contract = searchResponse.data[0];
+      const contract = results[0];
       const conid = contract.conid;
 
       // Prepare order object
       const order: any = {
-        conid: Number(conid), // Ensure conid is number
+        conid: Number(conid),
         orderType: orderRequest.orderType,
         side: orderRequest.action,
-        quantity: Number(orderRequest.quantity), // Ensure quantity is number
-        tif: orderRequest.tif || "DAY", // Time in force - default to DAY to avoid orphaned orders
+        quantity: Number(orderRequest.quantity),
+        tif: orderRequest.tif || "DAY",
       };
 
-      // Include exchange if specified
-      if (orderRequest.exchange) {
-        order.exchange = orderRequest.exchange;
+      if (orderRequest.exchange) order.exchange = orderRequest.exchange;
+
+      // Price-bearing types: LMT, STP_LIMIT, LOC, TRAILLMT all carry a `price`.
+      if (
+        (orderRequest.orderType === "LMT" ||
+          orderRequest.orderType === "STP_LIMIT" ||
+          orderRequest.orderType === "LOC" ||
+          orderRequest.orderType === "TRAILLMT") &&
+        orderRequest.price !== undefined
+      ) {
+        order.price = Number(orderRequest.price);
       }
 
-      // Add price for limit orders
-      if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
-        (order as any).price = Number(orderRequest.price);
+      // Aux-price (stop trigger) types: STP and STP_LIMIT.
+      if (
+        (orderRequest.orderType === "STP" || orderRequest.orderType === "STP_LIMIT") &&
+        orderRequest.stopPrice !== undefined
+      ) {
+        order.auxPrice = Number(orderRequest.stopPrice);
       }
 
-      // Add stop price for stop orders
-      if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) {
-        (order as any).auxPrice = Number(orderRequest.stopPrice);
+      // Trailing parameters: TRAIL and TRAILLMT.
+      if (
+        (orderRequest.orderType === "TRAIL" || orderRequest.orderType === "TRAILLMT") &&
+        orderRequest.trailingAmt !== undefined
+      ) {
+        order.trailingAmt = Number(orderRequest.trailingAmt);
+        order.trailingType = orderRequest.trailingType || "amt";
       }
+
+      // Pass-through optional fields.
+      if (orderRequest.outsideRTH !== undefined) order.outsideRTH = orderRequest.outsideRTH;
+      if (orderRequest.parentId !== undefined) order.parentId = orderRequest.parentId;
+      if (orderRequest.cOID !== undefined) order.cOID = orderRequest.cOID;
+      if (orderRequest.ocaGroup !== undefined) order.ocaGroup = orderRequest.ocaGroup;
+      if (orderRequest.useAdaptive !== undefined) order.useAdaptive = orderRequest.useAdaptive;
+      if (orderRequest.referrer !== undefined) order.referrer = orderRequest.referrer;
 
       // Place the order
       const response = await this.client.post(
@@ -687,6 +792,62 @@ export class IBClient {
       }
 
       throw new Error("Failed to place order");
+    }
+  }
+
+  /**
+   * Submit a pre-built orders payload directly. Used for bracket (parentId),
+   * OCA (ocaGroup), and multi-leg orders where the caller already knows the
+   * conid(s) and wants full control over the per-order fields. Skips the
+   * single-symbol secdef/search lookup.
+   *
+   * The IBKR endpoint POST /iserver/account/{accountId}/orders accepts the
+   * `{ orders: [...] }` envelope regardless of count.
+   */
+  async placeOrdersAdvanced(
+    accountId: string,
+    orders: RawOrderRequest[],
+    suppressConfirmations = false
+  ): Promise<any> {
+    try {
+      const normalized = orders.map((o) => {
+        const out: Record<string, any> = { ...o };
+        if (out.conid !== undefined) out.conid = Number(out.conid);
+        if (out.quantity !== undefined) out.quantity = Number(out.quantity);
+        if (out.price !== undefined) out.price = Number(out.price);
+        if (out.auxPrice !== undefined) out.auxPrice = Number(out.auxPrice);
+        if (out.trailingAmt !== undefined) out.trailingAmt = Number(out.trailingAmt);
+        if (out.tif === undefined) out.tif = "DAY";
+        return out;
+      });
+
+      const response = await this.client.post(
+        `/iserver/account/${accountId}/orders`,
+        { orders: normalized }
+      );
+
+      // Same auto-confirm handshake used by single-order placeOrder.
+      if (Array.isArray(response.data) && response.data.length > 0) {
+        const first = response.data[0];
+        if (first.id && first.message && first.messageIds && suppressConfirmations) {
+          Logger.log("[ORDERS-ADV] Order confirmation received, auto-confirming...", first);
+          return this.confirmOrder(first.id, first.messageIds);
+        }
+      }
+
+      return response.data;
+    } catch (error) {
+      Logger.error("[ORDERS-ADV] Failed to place orders:", error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error(
+          "Authentication required to place orders. Please authenticate with Interactive Brokers first."
+        );
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      throw new Error(
+        `Failed to place orders: ${(error as any)?.response?.data?.error || (error as any)?.message || error}`
+      );
     }
   }
 
@@ -845,6 +1006,76 @@ export class IBClient {
       
       throw new Error("Failed to retrieve orders");
     }
+  }
+
+  /**
+   * Resolve a ticker (optionally scoped to an exchange) to a single secdef row.
+   * Throws SymbolNotFoundError when no match is found.
+   */
+  async resolveSymbol(symbol: string, exchange?: string, secType?: string): Promise<any> {
+    let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
+    if (secType) {
+      searchUrl += `&secType=${encodeURIComponent(secType)}`;
+    }
+    const searchResponse = await this.client.get(searchUrl);
+    const results = this.filterSecdefByExchange(searchResponse.data || [], exchange);
+    if (!results || results.length === 0) {
+      throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? ' on ' + exchange : ''} not found`);
+    }
+    return results[0];
+  }
+
+  /**
+   * Cancel a working order.
+   * DELETE /iserver/account/{accountId}/order/{orderId}
+   */
+  async cancelOrder(accountId: string, orderId: string): Promise<any> {
+    return this.apiCall(`cancel order ${orderId}`, () =>
+      this.client.delete(`/iserver/account/${accountId}/order/${orderId}`)
+    );
+  }
+
+  /**
+   * Modify an existing, unfilled order ticket.
+   * POST /iserver/account/{accountId}/order/{orderId}
+   * Body is the new order shape (price/quantity/orderType/tif/etc.).
+   */
+  async modifyOrder(accountId: string, orderId: string, modifications: Record<string, any>): Promise<any> {
+    return this.apiCall(`modify order ${orderId}`, () =>
+      this.client.post(`/iserver/account/${accountId}/order/${orderId}`, modifications)
+    );
+  }
+
+  /**
+   * Preview an order: returns commission, margin impact, and other warnings
+   * without placing the order.
+   * POST /iserver/account/{accountId}/order/whatif
+   */
+  async previewOrder(accountId: string, order: Record<string, any>): Promise<any> {
+    return this.apiCall(`preview order for ${accountId}`, () =>
+      this.client.post(`/iserver/account/${accountId}/order/whatif`, { orders: [order] })
+    );
+  }
+
+  /**
+   * Suppress the order-placement confirmation messages identified by their
+   * messageIds for the current session.
+   * POST /iserver/questions/suppress
+   */
+  async suppressQuestions(messageIds: string[]): Promise<any> {
+    return this.apiCall(`suppress order questions`, () =>
+      this.client.post(`/iserver/questions/suppress`, { messageIds })
+    );
+  }
+
+  /**
+   * Reset any messages previously suppressed via /iserver/questions/suppress.
+   * POST /iserver/questions/suppress/reset
+   */
+  async resetQuestionSuppression(): Promise<any> {
+    return this.apiCall(`reset suppressed order questions`, () =>
+      this.client.post(`/iserver/questions/suppress/reset`)
+    );
   }
 
   async getScannerParams(): Promise<any> {
@@ -1062,5 +1293,329 @@ export class IBClient {
       
       throw new Error("Failed to delete alert: " + (error as any).message);
     }
+  }
+
+  // ── Market Data ───────────────────────────────────────────────────────────
+
+  /**
+   * Historical OHLCV bars.
+   * GET /iserver/marketdata/history
+   */
+  async getHistoricalData(params: {
+    conid: number | string;
+    period: string;
+    bar: string;
+    exchange?: string;
+    outsideRTH?: boolean;
+    source?: string;
+    startTime?: string;
+  }): Promise<any> {
+    const search = new URLSearchParams();
+    search.set("conid", String(params.conid));
+    search.set("period", params.period);
+    search.set("bar", params.bar);
+    if (params.exchange) search.set("exchange", params.exchange);
+    if (params.outsideRTH !== undefined) search.set("outsideRth", String(params.outsideRTH));
+    if (params.source) search.set("source", params.source);
+    if (params.startTime) search.set("startTime", params.startTime);
+
+    return this.apiCall(`get historical data for conid ${params.conid}`, () =>
+      this.client.get(`/iserver/marketdata/history?${search.toString()}`)
+    );
+  }
+
+  /** GET /iserver/marketdata/{conid}/unsubscribe */
+  async unsubscribeMarketData(conid: number | string): Promise<any> {
+    return this.apiCall(`unsubscribe market data for conid ${conid}`, () =>
+      this.client.get(`/iserver/marketdata/${conid}/unsubscribe`)
+    );
+  }
+
+  /** GET /iserver/marketdata/unsubscribeall */
+  async unsubscribeAllMarketData(): Promise<any> {
+    return this.apiCall(`unsubscribe all market data`, () =>
+      this.client.get(`/iserver/marketdata/unsubscribeall`)
+    );
+  }
+
+  /**
+   * Batch snapshot for a list of conids and fields.
+   * GET /iserver/marketdata/snapshot?conids=...&fields=...
+   * IBKR may require multiple calls before data is populated; this method
+   * accepts an optional `warmupAttempts` and `warmupDelayMs` to retry until
+   * the response has live values for at least one conid.
+   */
+  async getMarketDataSnapshot(
+    conids: Array<number | string>,
+    fields: string,
+    warmupAttempts = 1,
+    warmupDelayMs = 500
+  ): Promise<any> {
+    const search = new URLSearchParams();
+    search.set("conids", conids.join(","));
+    search.set("fields", fields);
+    const url = `/iserver/marketdata/snapshot?${search.toString()}`;
+
+    let lastData: any;
+    for (let attempt = 0; attempt < Math.max(1, warmupAttempts); attempt++) {
+      const data = await this.apiCall(`get market data snapshot`, () => this.client.get(url));
+      lastData = data;
+      const hasFields = Array.isArray(data) && data.some((row: any) =>
+        Object.keys(row || {}).some((k) => /^\d+$/.test(k))
+      );
+      if (hasFields) return data;
+      if (attempt < warmupAttempts - 1) {
+        await new Promise((r) => setTimeout(r, warmupDelayMs));
+      }
+    }
+    return lastData;
+  }
+
+  // ── Portfolio & Analytics ─────────────────────────────────────────────────
+
+  /** GET /portfolio/{accountId}/ledger */
+  async getAccountLedger(accountId: string): Promise<any> {
+    return this.apiCall(`get account ledger for ${accountId}`, () =>
+      this.client.get(`/portfolio/${accountId}/ledger`)
+    );
+  }
+
+  /** GET /portfolio/{accountId}/allocation */
+  async getAccountAllocation(accountId: string): Promise<any> {
+    return this.apiCall(`get account allocation for ${accountId}`, () =>
+      this.client.get(`/portfolio/${accountId}/allocation`)
+    );
+  }
+
+  /** POST /portfolio/allocation — consolidated allocation across accounts */
+  async getConsolidatedAllocation(accountIds: string[]): Promise<any> {
+    return this.apiCall(`get consolidated allocation`, () =>
+      this.client.post(`/portfolio/allocation`, { acctIds: accountIds })
+    );
+  }
+
+  /** GET /portfolio/{accountId}/meta */
+  async getAccountMeta(accountId: string): Promise<any> {
+    return this.apiCall(`get account meta for ${accountId}`, () =>
+      this.client.get(`/portfolio/${accountId}/meta`)
+    );
+  }
+
+  /** GET /portfolio/subaccounts */
+  async getSubaccounts(): Promise<any> {
+    return this.apiCall(`get subaccounts`, () => this.client.get(`/portfolio/subaccounts`));
+  }
+
+  /** GET /iserver/account/pnl/partitioned */
+  async getPnl(): Promise<any> {
+    return this.apiCall(`get PnL`, () => this.client.get(`/iserver/account/pnl/partitioned`));
+  }
+
+  /** GET /iserver/account/trades — today's plus up to 6 prior days */
+  async getTrades(days?: number): Promise<any> {
+    const url = days ? `/iserver/account/trades?days=${encodeURIComponent(String(days))}` : `/iserver/account/trades`;
+    return this.apiCall(`get trades`, () => this.client.get(url));
+  }
+
+  /**
+   * Walk every page of /portfolio/{accountId}/positions/{pageId}.
+   * IBKR returns 30 rows per page; this iterates until the page is empty.
+   * pageSize is enforced server-side (30) — `maxPages` is a safety cap.
+   */
+  async getAllPositions(accountId: string, maxPages = 50): Promise<any[]> {
+    const all: any[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const data = await this.apiCall(`get positions page ${page} for ${accountId}`, () =>
+        this.client.get(`/portfolio/${accountId}/positions/${page}`)
+      );
+      if (!Array.isArray(data) || data.length === 0) break;
+      all.push(...data);
+      if (data.length < 30) break;
+    }
+    return all;
+  }
+
+  /** GET /portfolio/{accountId}/position/{conid} */
+  async getPositionByConid(accountId: string, conid: number | string): Promise<any> {
+    return this.apiCall(`get position for conid ${conid}`, () =>
+      this.client.get(`/portfolio/${accountId}/position/${conid}`)
+    );
+  }
+
+  /** GET /portfolio/positions/{conid} — position across all accounts */
+  async getPositionsAcrossAccounts(conid: number | string): Promise<any> {
+    return this.apiCall(`get positions for conid ${conid} across accounts`, () =>
+      this.client.get(`/portfolio/positions/${conid}`)
+    );
+  }
+
+  /** POST /pa/performance */
+  async getPerformance(accountIds: string[], period?: string): Promise<any> {
+    const body: any = { acctIds: accountIds };
+    if (period) body.period = period;
+    return this.apiCall(`get performance`, () => this.client.post(`/pa/performance`, body));
+  }
+
+  /** POST /pa/summary */
+  async getPerformanceSummary(accountIds: string[]): Promise<any> {
+    return this.apiCall(`get performance summary`, () =>
+      this.client.post(`/pa/summary`, { acctIds: accountIds })
+    );
+  }
+
+  /** POST /pa/transactions */
+  async getTransactionAnalytics(params: { acctIds: string[]; conids: Array<number | string>; days?: number; currency?: string }): Promise<any> {
+    const body: any = { acctIds: params.acctIds, conids: params.conids.map((c) => Number(c)) };
+    if (params.days !== undefined) body.days = params.days;
+    if (params.currency) body.currency = params.currency;
+    return this.apiCall(`get transaction analytics`, () =>
+      this.client.post(`/pa/transactions`, body)
+    );
+  }
+
+  // ── Contracts ─────────────────────────────────────────────────────────────
+
+  /** GET /iserver/contract/{conid}/info */
+  async getContractInfo(conid: number | string): Promise<any> {
+    return this.apiCall(`get contract info for conid ${conid}`, () =>
+      this.client.get(`/iserver/contract/${conid}/info`)
+    );
+  }
+
+  /** POST /trsrv/secdef — security definitions by conid */
+  async getSecdefByConid(conids: Array<number | string>): Promise<any> {
+    return this.apiCall(`get secdef by conid`, () =>
+      this.client.post(`/trsrv/secdef`, { conids: conids.map((c) => Number(c)) })
+    );
+  }
+
+  /** GET /trsrv/futures?symbols=ES,NQ */
+  async getFuturesBySymbol(symbols: string[]): Promise<any> {
+    return this.apiCall(`get futures contracts`, () =>
+      this.client.get(`/trsrv/futures?symbols=${encodeURIComponent(symbols.join(","))}`)
+    );
+  }
+
+  /** GET /trsrv/stocks?symbols=AAPL,MSFT */
+  async getStocksBySymbol(symbols: string[]): Promise<any> {
+    return this.apiCall(`get stock contracts`, () =>
+      this.client.get(`/trsrv/stocks?symbols=${encodeURIComponent(symbols.join(","))}`)
+    );
+  }
+
+  /**
+   * Expose /iserver/secdef/search to users directly with optional secType
+   * and name (company-name search) flags.
+   */
+  async searchContracts(params: { symbol: string; secType?: string; name?: boolean; exchange?: string }): Promise<any> {
+    const search = new URLSearchParams();
+    search.set("symbol", params.symbol);
+    if (params.secType) search.set("secType", params.secType);
+    if (params.name) search.set("name", "true");
+    const url = `/iserver/secdef/search?${search.toString()}`;
+    const data = await this.apiCall<any[]>(`search contracts for ${params.symbol}`, () => this.client.get(url));
+    return this.filterSecdefByExchange(data || [], params.exchange);
+  }
+
+  // ── Watchlists ────────────────────────────────────────────────────────────
+
+  /** GET /iserver/watchlists */
+  async listWatchlists(): Promise<any> {
+    return this.apiCall(`list watchlists`, () => this.client.get(`/iserver/watchlists`));
+  }
+
+  /** GET /iserver/watchlist?id={id} */
+  async getWatchlist(id: string): Promise<any> {
+    return this.apiCall(`get watchlist ${id}`, () =>
+      this.client.get(`/iserver/watchlist?id=${encodeURIComponent(id)}`)
+    );
+  }
+
+  /** POST /iserver/watchlist */
+  async createWatchlist(id: string, name: string, conids: Array<number | string>): Promise<any> {
+    const rows = conids.map((c) => ({ C: Number(c) }));
+    return this.apiCall(`create watchlist ${name}`, () =>
+      this.client.post(`/iserver/watchlist`, { id, name, rows })
+    );
+  }
+
+  /** DELETE /iserver/watchlist?id={id} */
+  async deleteWatchlist(id: string): Promise<any> {
+    return this.apiCall(`delete watchlist ${id}`, () =>
+      this.client.delete(`/iserver/watchlist?id=${encodeURIComponent(id)}`)
+    );
+  }
+
+  // ── News ──────────────────────────────────────────────────────────────────
+
+  /** GET /iserver/news/portfolio */
+  async getNewsPortfolio(): Promise<any> {
+    return this.apiCall(`get portfolio news`, () => this.client.get(`/iserver/news/portfolio`));
+  }
+
+  /** GET /iserver/news/top */
+  async getNewsTop(): Promise<any> {
+    return this.apiCall(`get top news`, () => this.client.get(`/iserver/news/top`));
+  }
+
+  /** GET /news/articles/{articleId} */
+  async getNewsArticle(articleId: string): Promise<any> {
+    return this.apiCall(`get news article ${articleId}`, () =>
+      this.client.get(`/news/articles/${encodeURIComponent(articleId)}`)
+    );
+  }
+
+  // ── FYI Notifications ─────────────────────────────────────────────────────
+
+  /** GET /fyi/notifications?max={n} */
+  async getFyiNotifications(max?: number): Promise<any> {
+    const url = max ? `/fyi/notifications?max=${encodeURIComponent(String(max))}` : `/fyi/notifications`;
+    return this.apiCall(`get FYI notifications`, () => this.client.get(url));
+  }
+
+  /** GET /fyi/unreadnumber */
+  async getFyiUnreadCount(): Promise<any> {
+    return this.apiCall(`get FYI unread count`, () => this.client.get(`/fyi/unreadnumber`));
+  }
+
+  /** PUT /fyi/notifications/{notificationId} */
+  async markFyiRead(notificationId: string): Promise<any> {
+    return this.apiCall(`mark FYI ${notificationId} as read`, () =>
+      this.client.put(`/fyi/notifications/${encodeURIComponent(notificationId)}`)
+    );
+  }
+
+  /** GET /fyi/settings */
+  async getFyiSettings(): Promise<any> {
+    return this.apiCall(`get FYI settings`, () => this.client.get(`/fyi/settings`));
+  }
+
+  /** POST /fyi/settings/{typecode} */
+  async updateFyiSettings(typecode: string, enabled: boolean): Promise<any> {
+    return this.apiCall(`update FYI settings for ${typecode}`, () =>
+      this.client.post(`/fyi/settings/${encodeURIComponent(typecode)}`, { enabled })
+    );
+  }
+
+  // ── Session ───────────────────────────────────────────────────────────────
+
+  /** POST /logout */
+  async logout(): Promise<any> {
+    const result = await this.apiCall(`logout`, () => this.client.post(`/logout`));
+    this.isAuthenticated = false;
+    this.stopTickle();
+    return result;
+  }
+
+  /** POST /iserver/account — select active brokerage account */
+  async setActiveAccount(accountId: string): Promise<any> {
+    return this.apiCall(`set active account to ${accountId}`, () =>
+      this.client.post(`/iserver/account`, { acctId: accountId })
+    );
+  }
+
+  /** GET /ibcust/entity/info */
+  async getEntityInfo(): Promise<any> {
+    return this.apiCall(`get entity info`, () => this.client.get(`/ibcust/entity/info`));
   }
 }

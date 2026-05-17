@@ -37,6 +37,51 @@ describe('ToolHandlers', () => {
       createAlert: vi.fn().mockResolvedValue({ request_id: '1' }),
       activateAlert: vi.fn().mockResolvedValue({ success: true }),
       deleteAlert: vi.fn().mockResolvedValue({ success: true }),
+      cancelOrder: vi.fn().mockResolvedValue({ msg: 'Request was submitted' }),
+      modifyOrder: vi.fn().mockResolvedValue([{ order_id: '789', status: 'PreSubmitted' }]),
+      previewOrder: vi.fn().mockResolvedValue({ amount: { commission: '1.00' } }),
+      resolveSymbol: vi.fn().mockResolvedValue({ conid: 265598, symbol: 'AAPL' }),
+      suppressQuestions: vi.fn().mockResolvedValue({ status: true }),
+      resetQuestionSuppression: vi.fn().mockResolvedValue({ status: 'reset' }),
+      getHistoricalData: vi.fn().mockResolvedValue({ bars: [] }),
+      unsubscribeMarketData: vi.fn().mockResolvedValue({ success: true }),
+      unsubscribeAllMarketData: vi.fn().mockResolvedValue({ success: true }),
+      getMarketDataSnapshot: vi.fn().mockResolvedValue([{ conid: 265598, '31': '150.25' }]),
+      getAccountLedger: vi.fn().mockResolvedValue({ BASE: {} }),
+      getAccountAllocation: vi.fn().mockResolvedValue({}),
+      getAccountMeta: vi.fn().mockResolvedValue({ type: 'INDIVIDUAL' }),
+      getConsolidatedAllocation: vi.fn().mockResolvedValue({}),
+      getSubaccounts: vi.fn().mockResolvedValue([]),
+      getPnl: vi.fn().mockResolvedValue({ upnl: {} }),
+      getTrades: vi.fn().mockResolvedValue([]),
+      getAllPositions: vi.fn().mockResolvedValue([]),
+      getPositionByConid: vi.fn().mockResolvedValue({}),
+      getPositionsAcrossAccounts: vi.fn().mockResolvedValue({}),
+      getPerformance: vi.fn().mockResolvedValue({}),
+      getPerformanceSummary: vi.fn().mockResolvedValue({}),
+      getTransactionAnalytics: vi.fn().mockResolvedValue({}),
+      getContractInfo: vi.fn().mockResolvedValue({}),
+      getSecdefByConid: vi.fn().mockResolvedValue([]),
+      getFuturesBySymbol: vi.fn().mockResolvedValue([]),
+      getStocksBySymbol: vi.fn().mockResolvedValue([]),
+      searchContracts: vi.fn().mockResolvedValue([{ conid: 265598, symbol: 'AAPL' }]),
+      listWatchlists: vi.fn().mockResolvedValue([]),
+      getWatchlist: vi.fn().mockResolvedValue({}),
+      createWatchlist: vi.fn().mockResolvedValue({}),
+      deleteWatchlist: vi.fn().mockResolvedValue({}),
+      getNewsPortfolio: vi.fn().mockResolvedValue([]),
+      getNewsTop: vi.fn().mockResolvedValue([]),
+      getNewsArticle: vi.fn().mockResolvedValue({}),
+      getFyiNotifications: vi.fn().mockResolvedValue([]),
+      getFyiUnreadCount: vi.fn().mockResolvedValue({ count: 0 }),
+      markFyiRead: vi.fn().mockResolvedValue({ ok: true }),
+      getFyiSettings: vi.fn().mockResolvedValue({}),
+      updateFyiSettings: vi.fn().mockResolvedValue({ ok: true }),
+      logout: vi.fn().mockResolvedValue({}),
+      setActiveAccount: vi.fn().mockResolvedValue({}),
+      getEntityInfo: vi.fn().mockResolvedValue({}),
+      runScanner: vi.fn().mockResolvedValue({ scanResults: [] }),
+      placeOrdersAdvanced: vi.fn().mockResolvedValue([{ id: 'o1' }]),
     } as any;
 
     // Create mock GatewayManager
@@ -466,6 +511,257 @@ describe('ToolHandlers', () => {
 
       expect(mockIBClient.checkAuthenticationStatus).toHaveBeenCalledTimes(2);
       expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Order Lifecycle Handlers', () => {
+    it('cancelOrder should call IBClient.cancelOrder and return the response', async () => {
+      const result = await handlers.cancelOrder({ accountId: 'U12345', orderId: '789' });
+      expect(mockIBClient.cancelOrder).toHaveBeenCalledWith('U12345', '789');
+      expect(result.content[0].text).toContain('Request was submitted');
+    });
+
+    it('modifyOrder should pass modifications through to IBClient', async () => {
+      await handlers.modifyOrder({
+        accountId: 'U12345',
+        orderId: '789',
+        price: 188.5,
+        quantity: 5,
+        tif: 'GTC',
+      } as any);
+
+      expect(mockIBClient.modifyOrder).toHaveBeenCalledWith(
+        'U12345',
+        '789',
+        expect.objectContaining({ price: 188.5, quantity: 5, tif: 'GTC' })
+      );
+    });
+
+    it('modifyOrder should merge extraFields with primary fields', async () => {
+      await handlers.modifyOrder({
+        accountId: 'U12345',
+        orderId: '789',
+        price: 188.5,
+        extraFields: { outsideRTH: true, ocaGroup: 'bracket-1' },
+      } as any);
+
+      const mods = (mockIBClient.modifyOrder as any).mock.calls[0][2];
+      expect(mods).toMatchObject({ price: 188.5, outsideRTH: true, ocaGroup: 'bracket-1' });
+      // extraFields should not appear under its own key in the outbound payload.
+      expect(mods.extraFields).toBeUndefined();
+    });
+
+    it('previewOrder should resolve symbol to conid and send whatif request', async () => {
+      await handlers.previewOrder({
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 100,
+        price: 185,
+      } as any);
+
+      expect(mockIBClient.resolveSymbol).toHaveBeenCalledWith('AAPL', undefined);
+      expect(mockIBClient.previewOrder).toHaveBeenCalledWith(
+        'U12345',
+        expect.objectContaining({ conid: 265598, side: 'BUY', orderType: 'LMT', quantity: 100, price: 185, tif: 'DAY' })
+      );
+    });
+
+    it('previewOrder should pass conid directly when provided (skipping resolveSymbol)', async () => {
+      await handlers.previewOrder({
+        accountId: 'U12345',
+        conid: 111111,
+        action: 'SELL',
+        orderType: 'MKT',
+        quantity: 10,
+      } as any);
+
+      expect(mockIBClient.resolveSymbol).not.toHaveBeenCalled();
+      expect(mockIBClient.previewOrder).toHaveBeenCalledWith(
+        'U12345',
+        expect.objectContaining({ conid: 111111, side: 'SELL', orderType: 'MKT', quantity: 10 })
+      );
+    });
+
+    it('suppressQuestions should forward messageIds', async () => {
+      await handlers.suppressQuestions({ messageIds: ['o10151', 'o10153'] });
+      expect(mockIBClient.suppressQuestions).toHaveBeenCalledWith(['o10151', 'o10153']);
+    });
+
+    it('resetQuestionSuppression should call the underlying client', async () => {
+      await handlers.resetQuestionSuppression({ confirm: true });
+      expect(mockIBClient.resetQuestionSuppression).toHaveBeenCalled();
+    });
+  });
+
+  describe('runScanner', () => {
+    it('should derive secType from instrument (STK → STK, OPT → OPT)', async () => {
+      await handlers.runScanner({
+        scanCode: 'TOP_PERC_GAIN',
+        instrument: 'STK',
+        locationCode: 'STK.US.MAJOR',
+        numberOfRows: 25,
+        optionTypeFilter: 'ALL',
+      } as any);
+
+      expect(mockIBClient.runScanner).toHaveBeenCalledWith(
+        expect.objectContaining({ instrument: 'STK', secType: 'STK' })
+      );
+
+      vi.mocked(mockIBClient.runScanner).mockClear();
+
+      await handlers.runScanner({
+        scanCode: 'OPT_VOLUME_MOST_ACTIVE',
+        instrument: 'OPT',
+        locationCode: 'OPT.US.MAJOR',
+        numberOfRows: 25,
+        optionTypeFilter: 'ALL',
+      } as any);
+
+      expect(mockIBClient.runScanner).toHaveBeenCalledWith(
+        expect.objectContaining({ instrument: 'OPT', secType: 'OPT' })
+      );
+    });
+  });
+
+  describe('placeOrdersAdvanced handler', () => {
+    it('should pass orders through to the IBClient', async () => {
+      const orders = [
+        { conid: 265598, side: 'BUY', orderType: 'LMT', quantity: 100, price: 185, cOID: 'p' },
+        { conid: 265598, side: 'SELL', orderType: 'LMT', quantity: 100, price: 195, parentId: 'p' },
+      ];
+
+      await handlers.placeOrdersAdvanced({
+        accountId: 'U12345',
+        orders,
+        suppressConfirmations: true,
+      } as any);
+
+      expect(mockIBClient.placeOrdersAdvanced).toHaveBeenCalledWith('U12345', orders, true);
+    });
+  });
+
+  describe('Phase 2 Data Handlers', () => {
+    it('getHistoricalData should resolve symbol → conid and forward params', async () => {
+      await handlers.getHistoricalData({
+        symbol: 'AAPL',
+        period: '5d',
+        bar: '30min',
+        outsideRTH: true,
+      } as any);
+
+      expect(mockIBClient.resolveSymbol).toHaveBeenCalledWith('AAPL', undefined);
+      expect(mockIBClient.getHistoricalData).toHaveBeenCalledWith(
+        expect.objectContaining({ conid: 265598, period: '5d', bar: '30min', outsideRTH: true })
+      );
+    });
+
+    it('getHistoricalData should skip resolveSymbol when conid is passed', async () => {
+      await handlers.getHistoricalData({
+        conid: 111111,
+        period: '1d',
+        bar: '5min',
+      } as any);
+
+      expect(mockIBClient.resolveSymbol).not.toHaveBeenCalled();
+      expect(mockIBClient.getHistoricalData).toHaveBeenCalledWith(
+        expect.objectContaining({ conid: 111111 })
+      );
+    });
+
+    it('getMarketDataSnapshot should pass conids/fields/warmup through', async () => {
+      await handlers.getMarketDataSnapshot({
+        conids: [265598, 76792991],
+        fields: '31,84,86,7308',
+        warmupAttempts: 3,
+      } as any);
+
+      expect(mockIBClient.getMarketDataSnapshot).toHaveBeenCalledWith(
+        [265598, 76792991],
+        '31,84,86,7308',
+        3
+      );
+    });
+
+    it('searchContracts should forward all filter options', async () => {
+      await handlers.searchContracts({
+        symbol: 'AAPL',
+        secType: 'STK',
+        name: false,
+        exchange: 'NASDAQ',
+      });
+
+      expect(mockIBClient.searchContracts).toHaveBeenCalledWith({
+        symbol: 'AAPL',
+        secType: 'STK',
+        name: false,
+        exchange: 'NASDAQ',
+      });
+    });
+
+    it('getTransactionAnalytics should map accountIds → acctIds for the IBKR API', async () => {
+      await handlers.getTransactionAnalytics({
+        accountIds: ['U1'],
+        conids: [265598],
+        days: 30,
+        currency: 'USD',
+      });
+
+      expect(mockIBClient.getTransactionAnalytics).toHaveBeenCalledWith({
+        acctIds: ['U1'],
+        conids: [265598],
+        days: 30,
+        currency: 'USD',
+      });
+    });
+
+    it('plain pass-through handlers should each call their IBClient counterpart', async () => {
+      await handlers.getAccountLedger({ accountId: 'U1' });
+      await handlers.getAccountAllocation({ accountId: 'U1' });
+      await handlers.getAccountMeta({ accountId: 'U1' });
+      await handlers.getSubaccounts({ confirm: true });
+      await handlers.getPnl({ confirm: true });
+      await handlers.getTrades({});
+      await handlers.getAllPositions({ accountId: 'U1', maxPages: 50 });
+      await handlers.getPositionByConid({ accountId: 'U1', conid: 265598 });
+      await handlers.getPositionsAcrossAccounts({ conid: 265598 });
+      await handlers.getContractInfo({ conid: 265598 });
+      await handlers.listWatchlists({ confirm: true });
+      await handlers.getNewsPortfolio({ confirm: true });
+      await handlers.getFyiUnreadCount({ confirm: true });
+      await handlers.getEntityInfo({ confirm: true });
+
+      expect(mockIBClient.getAccountLedger).toHaveBeenCalledWith('U1');
+      expect(mockIBClient.getAccountAllocation).toHaveBeenCalledWith('U1');
+      expect(mockIBClient.getAccountMeta).toHaveBeenCalledWith('U1');
+      expect(mockIBClient.getSubaccounts).toHaveBeenCalled();
+      expect(mockIBClient.getPnl).toHaveBeenCalled();
+      expect(mockIBClient.getTrades).toHaveBeenCalledWith(undefined);
+      expect(mockIBClient.getAllPositions).toHaveBeenCalledWith('U1', 50);
+      expect(mockIBClient.getPositionByConid).toHaveBeenCalledWith('U1', 265598);
+      expect(mockIBClient.getPositionsAcrossAccounts).toHaveBeenCalledWith(265598);
+      expect(mockIBClient.getContractInfo).toHaveBeenCalledWith(265598);
+      expect(mockIBClient.listWatchlists).toHaveBeenCalled();
+      expect(mockIBClient.getNewsPortfolio).toHaveBeenCalled();
+      expect(mockIBClient.getFyiUnreadCount).toHaveBeenCalled();
+      expect(mockIBClient.getEntityInfo).toHaveBeenCalled();
+    });
+
+    it('logout / setActiveAccount / mark FYI mutations should forward params', async () => {
+      await handlers.logout({ confirm: true });
+      await handlers.setActiveAccount({ accountId: 'U1' });
+      await handlers.markFyiRead({ notificationId: 'abc' });
+      await handlers.updateFyiSettings({ typecode: 'MA', enabled: true });
+      await handlers.createWatchlist({ id: '1', name: 'Tech', conids: [265598] });
+      await handlers.deleteWatchlist({ id: '1' });
+
+      expect(mockIBClient.logout).toHaveBeenCalled();
+      expect(mockIBClient.setActiveAccount).toHaveBeenCalledWith('U1');
+      expect(mockIBClient.markFyiRead).toHaveBeenCalledWith('abc');
+      expect(mockIBClient.updateFyiSettings).toHaveBeenCalledWith('MA', true);
+      expect(mockIBClient.createWatchlist).toHaveBeenCalledWith('1', 'Tech', [265598]);
+      expect(mockIBClient.deleteWatchlist).toHaveBeenCalledWith('1');
     });
   });
 

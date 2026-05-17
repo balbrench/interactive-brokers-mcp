@@ -10,6 +10,11 @@ import {
   CreateAlertZodSchema,
   ActivateAlertZodSchema,
   DeleteAlertZodSchema,
+  CancelOrderZodSchema,
+  ModifyOrderZodSchema,
+  PreviewOrderZodSchema,
+  SuppressQuestionsZodSchema,
+  ResetQuestionSuppressionZodSchema,
 } from '../src/tool-definitions.js';
 
 describe('Tool Definitions - Zod Schemas', () => {
@@ -139,6 +144,67 @@ describe('Tool Definitions - Zod Schemas', () => {
       
       const result = PlaceOrderZodSchema.safeParse(invalidOrder);
       expect(result.success).toBe(false);
+    });
+
+    it('should require both price and stopPrice for STP_LIMIT', () => {
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'STP_LIMIT',
+          quantity: 10,
+        }).success
+      ).toBe(false);
+
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'STP_LIMIT',
+          quantity: 10,
+          price: 179,
+          stopPrice: 180,
+        }).success
+      ).toBe(true);
+    });
+
+    it('should require trailingAmt for TRAIL', () => {
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'TRAIL',
+          quantity: 10,
+        }).success
+      ).toBe(false);
+
+      expect(
+        PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'SELL',
+          orderType: 'TRAIL',
+          quantity: 10,
+          trailingAmt: 1.5,
+          trailingType: 'amt',
+        }).success
+      ).toBe(true);
+    });
+
+    it('should accept MIDPRICE / MOC without extra fields', () => {
+      for (const orderType of ['MIDPRICE', 'MOC'] as const) {
+        const result = PlaceOrderZodSchema.safeParse({
+          accountId: 'U1',
+          symbol: 'AAPL',
+          action: 'BUY',
+          orderType,
+          quantity: 10,
+        });
+        expect(result.success).toBe(true);
+      }
     });
 
     it('should accept valid STP order with stopPrice', () => {
@@ -372,6 +438,88 @@ describe('Tool Definitions - Zod Schemas', () => {
         accountId: 'U12345',
       });
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe('CancelOrderZodSchema', () => {
+    it('should require both accountId and orderId', () => {
+      expect(CancelOrderZodSchema.safeParse({}).success).toBe(false);
+      expect(CancelOrderZodSchema.safeParse({ accountId: 'U1' }).success).toBe(false);
+      expect(CancelOrderZodSchema.safeParse({ orderId: '789' }).success).toBe(false);
+      expect(CancelOrderZodSchema.safeParse({ accountId: 'U1', orderId: '789' }).success).toBe(true);
+    });
+  });
+
+  describe('ModifyOrderZodSchema', () => {
+    it('should require at least one modifiable field', () => {
+      expect(ModifyOrderZodSchema.safeParse({ accountId: 'U1', orderId: '789' }).success).toBe(false);
+    });
+
+    it('should accept a price change', () => {
+      expect(
+        ModifyOrderZodSchema.safeParse({ accountId: 'U1', orderId: '789', price: 188.5 }).success
+      ).toBe(true);
+    });
+
+    it('should accept extraFields for IBKR-specific keys', () => {
+      const result = ModifyOrderZodSchema.safeParse({
+        accountId: 'U1',
+        orderId: '789',
+        extraFields: { outsideRTH: true, ocaGroup: 'b1' },
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('PreviewOrderZodSchema', () => {
+    it('should require either symbol or conid', () => {
+      const result = PreviewOrderZodSchema.safeParse({
+        accountId: 'U1',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 10,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('should accept symbol-only inputs', () => {
+      const result = PreviewOrderZodSchema.safeParse({
+        accountId: 'U1',
+        symbol: 'AAPL',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 10,
+        price: 150,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept conid-only inputs (skip symbol search)', () => {
+      const result = PreviewOrderZodSchema.safeParse({
+        accountId: 'U1',
+        conid: 265598,
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 10,
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('SuppressQuestionsZodSchema', () => {
+    it('should require a non-empty messageIds array', () => {
+      expect(SuppressQuestionsZodSchema.safeParse({ messageIds: [] }).success).toBe(false);
+      expect(
+        SuppressQuestionsZodSchema.safeParse({ messageIds: ['o10151'] }).success
+      ).toBe(true);
+    });
+  });
+
+  describe('ResetQuestionSuppressionZodSchema', () => {
+    it('should require confirm:true', () => {
+      expect(ResetQuestionSuppressionZodSchema.safeParse({}).success).toBe(false);
+      expect(ResetQuestionSuppressionZodSchema.safeParse({ confirm: true }).success).toBe(true);
+      expect(ResetQuestionSuppressionZodSchema.safeParse({ confirm: false }).success).toBe(false);
     });
   });
 

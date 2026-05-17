@@ -24,6 +24,49 @@ import {
   GetScannerParamsInput,
   RunScannerInput,
   GetOptionsChainInput,
+  PlaceOrdersAdvancedInput,
+  CancelOrderInput,
+  ModifyOrderInput,
+  PreviewOrderInput,
+  SuppressQuestionsInput,
+  ResetQuestionSuppressionInput,
+  GetHistoricalDataInput,
+  UnsubscribeMarketDataInput,
+  UnsubscribeAllMarketDataInput,
+  GetMarketDataSnapshotInput,
+  GetAccountLedgerInput,
+  GetAccountAllocationInput,
+  GetAccountMetaInput,
+  GetConsolidatedAllocationInput,
+  GetSubaccountsInput,
+  GetPnlInput,
+  GetTradesInput,
+  GetAllPositionsInput,
+  GetPositionByConidInput,
+  GetPositionsAcrossAccountsInput,
+  GetPerformanceInput,
+  GetPerformanceSummaryInput,
+  GetTransactionAnalyticsInput,
+  GetContractInfoInput,
+  GetSecdefByConidInput,
+  GetFuturesBySymbolInput,
+  GetStocksBySymbolInput,
+  SearchContractsInput,
+  ListWatchlistsInput,
+  GetWatchlistInput,
+  CreateWatchlistInput,
+  DeleteWatchlistInput,
+  GetNewsPortfolioInput,
+  GetNewsTopInput,
+  GetNewsArticleInput,
+  GetFyiNotificationsInput,
+  GetFyiUnreadCountInput,
+  MarkFyiReadInput,
+  GetFyiSettingsInput,
+  UpdateFyiSettingsInput,
+  LogoutInput,
+  SetActiveAccountInput,
+  GetEntityInfoInput,
 } from "./tool-definitions.js";
 
 export interface ToolHandlerContext {
@@ -794,11 +837,25 @@ export class ToolHandlers {
         filters.push({ code: "optionType", value: input.optionTypeFilter });
       }
 
+      // IBKR's /iserver/scanner/run expects secType to match the instrument.
+      // The original code hardcoded "OPT", which silently broke equity scans
+      // (instrument=STK with secType=OPT returns empty results). Derive secType
+      // from the instrument value the caller provided.
+      const secTypeByInstrument: Record<string, string> = {
+        OPT: "OPT",
+        STK: "STK",
+        FUT: "FUT",
+        FOP: "FOP",
+        IND: "IND",
+        BOND: "BOND",
+        WAR: "WAR",
+      };
+
       const body = {
         instrument: input.instrument,
         locationCode: input.locationCode,
         scanCode: input.scanCode,
-        secType: "OPT",
+        secType: secTypeByInstrument[input.instrument] || input.instrument,
         numberOfRows: Math.min(input.numberOfRows, 50),
         filters,
       };
@@ -872,6 +929,322 @@ export class ToolHandlers {
         ],
       };
     }
+  }
+
+  /**
+   * Shared scaffolding for plain pass-through handlers: gateway readiness,
+   * headless-mode auth, JSON-stringify the result, format errors.
+   */
+  private async runTool<T>(work: () => Promise<T>): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await work();
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  // ── Order Lifecycle Methods ─────────────────────────────────────────────────
+
+  async placeOrdersAdvanced(input: PlaceOrdersAdvancedInput): Promise<ToolHandlerResult> {
+    return this.runTool(() =>
+      this.context.ibClient.placeOrdersAdvanced(
+        input.accountId,
+        input.orders as any[],
+        input.suppressConfirmations
+      )
+    );
+  }
+
+  async cancelOrder(input: CancelOrderInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await this.context.ibClient.cancelOrder(input.accountId, input.orderId);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async modifyOrder(input: ModifyOrderInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const { accountId, orderId, extraFields, ...rest } = input;
+      const modifications: Record<string, any> = { ...rest, ...(extraFields || {}) };
+      if (modifications.quantity !== undefined) {
+        modifications.quantity = Number(modifications.quantity);
+      }
+      const result = await this.context.ibClient.modifyOrder(accountId, orderId, modifications);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async previewOrder(input: PreviewOrderInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+
+      let conid = input.conid;
+      if (!conid && input.symbol) {
+        const contract = await this.context.ibClient.resolveSymbol(input.symbol, input.exchange);
+        conid = Number(contract.conid);
+      }
+      if (!conid) {
+        return {
+          content: [{ type: "text", text: "Either symbol or conid is required" }],
+        };
+      }
+
+      const order: Record<string, any> = {
+        conid: Number(conid),
+        side: input.action,
+        orderType: input.orderType,
+        quantity: Number(input.quantity),
+        tif: input.tif || "DAY",
+      };
+      if (input.exchange) order.exchange = input.exchange;
+      if (input.price !== undefined) order.price = Number(input.price);
+      if (input.auxPrice !== undefined) order.auxPrice = Number(input.auxPrice);
+      if (input.trailingAmt !== undefined) order.trailingAmt = Number(input.trailingAmt);
+      if (input.trailingType !== undefined) order.trailingType = input.trailingType;
+      if (input.outsideRTH !== undefined) order.outsideRTH = input.outsideRTH;
+
+      const result = await this.context.ibClient.previewOrder(input.accountId, order);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async suppressQuestions(input: SuppressQuestionsInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await this.context.ibClient.suppressQuestions(input.messageIds);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async resetQuestionSuppression(_input: ResetQuestionSuppressionInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await this.context.ibClient.resetQuestionSuppression();
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  // ── Market Data ─────────────────────────────────────────────────────────────
+
+  async getHistoricalData(input: GetHistoricalDataInput): Promise<ToolHandlerResult> {
+    return this.runTool(async () => {
+      let conid = input.conid !== undefined ? Number(input.conid) : undefined;
+      if (!conid && input.symbol) {
+        const contract = await this.context.ibClient.resolveSymbol(input.symbol, input.exchange);
+        conid = Number(contract.conid);
+      }
+      if (!conid) {
+        throw new Error("Either conid or symbol is required");
+      }
+      return this.context.ibClient.getHistoricalData({
+        conid,
+        period: input.period,
+        bar: input.bar,
+        exchange: input.exchange,
+        outsideRTH: input.outsideRTH,
+        source: input.source,
+        startTime: input.startTime,
+      });
+    });
+  }
+
+  async unsubscribeMarketData(input: UnsubscribeMarketDataInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.unsubscribeMarketData(input.conid));
+  }
+
+  async unsubscribeAllMarketData(_input: UnsubscribeAllMarketDataInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.unsubscribeAllMarketData());
+  }
+
+  async getMarketDataSnapshot(input: GetMarketDataSnapshotInput): Promise<ToolHandlerResult> {
+    return this.runTool(() =>
+      this.context.ibClient.getMarketDataSnapshot(input.conids, input.fields, input.warmupAttempts)
+    );
+  }
+
+  // ── Portfolio & Analytics ───────────────────────────────────────────────────
+
+  async getAccountLedger(input: GetAccountLedgerInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getAccountLedger(input.accountId));
+  }
+
+  async getAccountAllocation(input: GetAccountAllocationInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getAccountAllocation(input.accountId));
+  }
+
+  async getAccountMeta(input: GetAccountMetaInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getAccountMeta(input.accountId));
+  }
+
+  async getConsolidatedAllocation(input: GetConsolidatedAllocationInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getConsolidatedAllocation(input.accountIds));
+  }
+
+  async getSubaccounts(_input: GetSubaccountsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getSubaccounts());
+  }
+
+  async getPnl(_input: GetPnlInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getPnl());
+  }
+
+  async getTrades(input: GetTradesInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getTrades(input.days));
+  }
+
+  async getAllPositions(input: GetAllPositionsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getAllPositions(input.accountId, input.maxPages));
+  }
+
+  async getPositionByConid(input: GetPositionByConidInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getPositionByConid(input.accountId, input.conid));
+  }
+
+  async getPositionsAcrossAccounts(input: GetPositionsAcrossAccountsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getPositionsAcrossAccounts(input.conid));
+  }
+
+  async getPerformance(input: GetPerformanceInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getPerformance(input.accountIds, input.period));
+  }
+
+  async getPerformanceSummary(input: GetPerformanceSummaryInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getPerformanceSummary(input.accountIds));
+  }
+
+  async getTransactionAnalytics(input: GetTransactionAnalyticsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() =>
+      this.context.ibClient.getTransactionAnalytics({
+        acctIds: input.accountIds,
+        conids: input.conids,
+        days: input.days,
+        currency: input.currency,
+      })
+    );
+  }
+
+  // ── Contracts ───────────────────────────────────────────────────────────────
+
+  async getContractInfo(input: GetContractInfoInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getContractInfo(input.conid));
+  }
+
+  async getSecdefByConid(input: GetSecdefByConidInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getSecdefByConid(input.conids));
+  }
+
+  async getFuturesBySymbol(input: GetFuturesBySymbolInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getFuturesBySymbol(input.symbols));
+  }
+
+  async getStocksBySymbol(input: GetStocksBySymbolInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getStocksBySymbol(input.symbols));
+  }
+
+  async searchContracts(input: SearchContractsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.searchContracts(input));
+  }
+
+  // ── Watchlists ──────────────────────────────────────────────────────────────
+
+  async listWatchlists(_input: ListWatchlistsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.listWatchlists());
+  }
+
+  async getWatchlist(input: GetWatchlistInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getWatchlist(input.id));
+  }
+
+  async createWatchlist(input: CreateWatchlistInput): Promise<ToolHandlerResult> {
+    return this.runTool(() =>
+      this.context.ibClient.createWatchlist(input.id, input.name, input.conids)
+    );
+  }
+
+  async deleteWatchlist(input: DeleteWatchlistInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.deleteWatchlist(input.id));
+  }
+
+  // ── News ────────────────────────────────────────────────────────────────────
+
+  async getNewsPortfolio(_input: GetNewsPortfolioInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getNewsPortfolio());
+  }
+
+  async getNewsTop(_input: GetNewsTopInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getNewsTop());
+  }
+
+  async getNewsArticle(input: GetNewsArticleInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getNewsArticle(input.articleId));
+  }
+
+  // ── FYI Notifications ───────────────────────────────────────────────────────
+
+  async getFyiNotifications(input: GetFyiNotificationsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getFyiNotifications(input.max));
+  }
+
+  async getFyiUnreadCount(_input: GetFyiUnreadCountInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getFyiUnreadCount());
+  }
+
+  async markFyiRead(input: MarkFyiReadInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.markFyiRead(input.notificationId));
+  }
+
+  async getFyiSettings(_input: GetFyiSettingsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getFyiSettings());
+  }
+
+  async updateFyiSettings(input: UpdateFyiSettingsInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.updateFyiSettings(input.typecode, input.enabled));
+  }
+
+  // ── Session ─────────────────────────────────────────────────────────────────
+
+  async logout(_input: LogoutInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.logout());
+  }
+
+  async setActiveAccount(input: SetActiveAccountInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.setActiveAccount(input.accountId));
+  }
+
+  async getEntityInfo(_input: GetEntityInfoInput): Promise<ToolHandlerResult> {
+    return this.runTool(() => this.context.ibClient.getEntityInfo());
   }
 
   // ── Flex Query Methods ──────────────────────────────────────────────────────
