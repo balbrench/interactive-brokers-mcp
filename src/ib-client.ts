@@ -535,28 +535,26 @@ export class IBClient {
     }
   }
 
-  async getMarketData(symbol: string, exchange?: string): Promise<any> {
+  async getMarketData(symbol: string, exchange?: string, fields?: string): Promise<any> {
     try {
-      // First, get the contract ID for the symbol, optionally filtered by exchange
-      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
-      if (exchange) {
-        searchUrl += `&name=${encodeURIComponent(exchange)}`;
-      }
+      const searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
       const searchResponse = await this.client.get(searchUrl);
 
-      if (!searchResponse.data || searchResponse.data.length === 0) {
+      const results = this.filterSecdefByExchange(searchResponse.data || [], exchange);
+      if (!results || results.length === 0) {
         throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? ' on ' + exchange : ''} not found`);
       }
 
-      const contract = searchResponse.data[0];
+      const contract = results[0];
       const conid = contract.conid;
 
-      // Get market data snapshot
-      // Using corrected field IDs based on IB Client Portal API documentation:
-      // 31=Last Price, 70=Day High, 71=Day Low, 82=Change, 83=Change%, 
-      // 84=Bid, 85=Ask Size, 86=Ask, 87=Volume, 88=Bid Size
+      // Default field set: 31=Last Price, 70=Day High, 71=Day Low, 82=Change,
+      // 83=Change%, 84=Bid, 85=Ask Size, 86=Ask, 87=Volume, 88=Bid Size.
+      // Caller may supply a custom CSV via `fields` to request greeks (7308,7309,
+      // 7310,7311,7607,…) or other tags.
+      const fieldList = fields && fields.length > 0 ? fields : "31,70,71,82,83,84,85,86,87,88";
       const response = await this.client.get(
-        `/iserver/marketdata/snapshot?conids=${conid}&fields=31,70,71,82,83,84,85,86,87,88`
+        `/iserver/marketdata/snapshot?conids=${conid}&fields=${encodeURIComponent(fieldList)}`
       );
 
       return {
@@ -585,43 +583,95 @@ export class IBClient {
 
   private isAuthenticationError(error: any): boolean {
     if (!error) return false;
-    
+
     const errorMessage = error.message || error.toString();
     const errorStatus = error.response?.status;
     const responseData = error.response?.data;
-    
-    // Check for common authentication error patterns
+
+    // Only treat as auth error when the response is explicitly authentication
+    // related. Previously HTTP 500 was treated as auth, which masked genuine
+    // server errors as "please authenticate".
+    const responseErrorText =
+      typeof responseData?.error === "string"
+        ? responseData.error
+        : responseData?.error?.message || "";
+
     return (
       errorStatus === 401 ||
       errorStatus === 403 ||
-      errorStatus === 500 ||  // IB Gateway sometimes returns 500 for auth issues
-      errorMessage.includes("authentication") ||
-      errorMessage.includes("authenticate") ||
-      errorMessage.includes("unauthorized") ||
       errorMessage.includes("not authenticated") ||
-      errorMessage.includes("login") ||
-      responseData?.error?.message?.includes("not authenticated") ||
-      responseData?.error?.message?.includes("authentication") ||
-      // IB Gateway specific patterns
-      responseData?.error === "not authenticated" ||
-      (errorStatus === 500 && responseData?.error?.includes("authentication"))
+      errorMessage.includes("unauthorized") ||
+      responseErrorText.includes("not authenticated") ||
+      responseErrorText.includes("authentication required") ||
+      responseData?.error === "not authenticated"
     );
+  }
+
+  /**
+   * Wrap an IBKR REST call with consistent error handling: classify auth errors
+   * for `isAuthError` propagation, preserve `SymbolNotFoundError`, and surface a
+   * useful `Failed to ...` message that includes the underlying axios body so
+   * callers can act on IBKR's specific error responses.
+   */
+  private async apiCall<T>(opName: string, fn: () => Promise<{ data: T }>): Promise<T> {
+    try {
+      const response = await fn();
+      return response.data;
+    } catch (error) {
+      Logger.error(`Failed to ${opName}:`, error);
+      if (this.isAuthenticationError(error)) {
+        const authError = new Error(
+          `Authentication required to ${opName}. Please authenticate with Interactive Brokers first.`
+        );
+        (authError as any).isAuthError = true;
+        throw authError;
+      }
+      if (error instanceof SymbolNotFoundError) {
+        throw error;
+      }
+      const detail =
+        (error as any)?.response?.data?.error ||
+        (error as any)?.response?.data?.message ||
+        (error as any)?.message ||
+        String(error);
+      throw new Error(`Failed to ${opName}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    }
+  }
+
+  /**
+   * Filter `secdef/search` results to the rows that look like a specific exchange.
+   * IBKR `secdef/search` accepts only `symbol`, `secType`, and a `name` boolean
+   * (search by company name). Sending `&name=<exchange>` does not filter by
+   * exchange — it asks the gateway to interpret the query as a company name and
+   * usually returns the same set, so we filter client-side using the response's
+   * `description` field (typically the listing exchange).
+   */
+  private filterSecdefByExchange(results: any[], exchange?: string): any[] {
+    if (!exchange) return results;
+    const target = exchange.toUpperCase();
+    const matches = (results || []).filter((row) => {
+      const desc = String(row?.description || "").toUpperCase();
+      const header = String(row?.companyHeader || "").toUpperCase();
+      if (!desc && !header) return false;
+      return desc.split(/[,/\s]+/).includes(target) || header.includes(` ${target}`) || header.endsWith(target);
+    });
+    // Fallback: if no row matches, return everything so callers can still surface
+    // a sensible error/result instead of an empty list caused by overly strict
+    // matching against IBKR's description formatting.
+    return matches.length > 0 ? matches : results;
   }
 
   async placeOrder(orderRequest: OrderRequest): Promise<any> {
     try {
-      // First, get the contract ID for the symbol, optionally filtered by exchange
-      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
-      if (orderRequest.exchange) {
-        searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
-      }
+      const searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
       const searchResponse = await this.client.get(searchUrl);
 
-      if (!searchResponse.data || searchResponse.data.length === 0) {
+      const results = this.filterSecdefByExchange(searchResponse.data || [], orderRequest.exchange);
+      if (!results || results.length === 0) {
         throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? ' on ' + orderRequest.exchange : ''} not found`);
       }
 
-      const contract = searchResponse.data[0];
+      const contract = results[0];
       const conid = contract.conid;
 
       // Prepare order object
@@ -845,6 +895,76 @@ export class IBClient {
       
       throw new Error("Failed to retrieve orders");
     }
+  }
+
+  /**
+   * Resolve a ticker (optionally scoped to an exchange) to a single secdef row.
+   * Throws SymbolNotFoundError when no match is found.
+   */
+  async resolveSymbol(symbol: string, exchange?: string, secType?: string): Promise<any> {
+    let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
+    if (secType) {
+      searchUrl += `&secType=${encodeURIComponent(secType)}`;
+    }
+    const searchResponse = await this.client.get(searchUrl);
+    const results = this.filterSecdefByExchange(searchResponse.data || [], exchange);
+    if (!results || results.length === 0) {
+      throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? ' on ' + exchange : ''} not found`);
+    }
+    return results[0];
+  }
+
+  /**
+   * Cancel a working order.
+   * DELETE /iserver/account/{accountId}/order/{orderId}
+   */
+  async cancelOrder(accountId: string, orderId: string): Promise<any> {
+    return this.apiCall(`cancel order ${orderId}`, () =>
+      this.client.delete(`/iserver/account/${accountId}/order/${orderId}`)
+    );
+  }
+
+  /**
+   * Modify an existing, unfilled order ticket.
+   * POST /iserver/account/{accountId}/order/{orderId}
+   * Body is the new order shape (price/quantity/orderType/tif/etc.).
+   */
+  async modifyOrder(accountId: string, orderId: string, modifications: Record<string, any>): Promise<any> {
+    return this.apiCall(`modify order ${orderId}`, () =>
+      this.client.post(`/iserver/account/${accountId}/order/${orderId}`, modifications)
+    );
+  }
+
+  /**
+   * Preview an order: returns commission, margin impact, and other warnings
+   * without placing the order.
+   * POST /iserver/account/{accountId}/order/whatif
+   */
+  async previewOrder(accountId: string, order: Record<string, any>): Promise<any> {
+    return this.apiCall(`preview order for ${accountId}`, () =>
+      this.client.post(`/iserver/account/${accountId}/order/whatif`, { orders: [order] })
+    );
+  }
+
+  /**
+   * Suppress the order-placement confirmation messages identified by their
+   * messageIds for the current session.
+   * POST /iserver/questions/suppress
+   */
+  async suppressQuestions(messageIds: string[]): Promise<any> {
+    return this.apiCall(`suppress order questions`, () =>
+      this.client.post(`/iserver/questions/suppress`, { messageIds })
+    );
+  }
+
+  /**
+   * Reset any messages previously suppressed via /iserver/questions/suppress.
+   * POST /iserver/questions/suppress/reset
+   */
+  async resetQuestionSuppression(): Promise<any> {
+    return this.apiCall(`reset suppressed order questions`, () =>
+      this.client.post(`/iserver/questions/suppress/reset`)
+    );
   }
 
   async getScannerParams(): Promise<any> {

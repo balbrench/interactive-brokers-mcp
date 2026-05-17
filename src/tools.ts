@@ -20,7 +20,12 @@ import {
   ForgetFlexQueryZodShape,
   GetScannerParamsZodShape,
   RunScannerZodShape,
-  GetOptionsChainZodShape
+  GetOptionsChainZodShape,
+  CancelOrderZodShape,
+  ModifyOrderZodShape,
+  PreviewOrderZodShape,
+  SuppressQuestionsZodShape,
+  ResetQuestionSuppressionZodShape
 } from "./tool-definitions.js";
 
 export function registerTools(
@@ -111,6 +116,61 @@ export function registerTools(
       "Manually confirm an order that requires confirmation. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\", \"messageIds\": [\"o10151\", \"o10153\"] }`.",
       ConfirmOrderZodShape,
       async (args) => await handlers.confirmOrder(args)
+    );
+  }
+
+  // preview_order is read-only by design (no trading impact) and is registered
+  // even when IB_READ_ONLY_MODE is enabled so callers can still estimate
+  // commission / margin before placing.
+  server.tool(
+    "preview_order",
+    "Preview the margin impact, commission, and warnings for a hypothetical order without placing it. " +
+    "Maps to IBKR's /iserver/account/{accountId}/order/whatif endpoint. " +
+    "Usage: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":100,\"price\":185 }` " +
+    "or pass `conid` directly to skip the symbol lookup.",
+    PreviewOrderZodShape,
+    async (args) => await handlers.previewOrder(args)
+  );
+
+  // Register cancel_order tool (skip if in read-only mode)
+  if (!userConfig?.IB_READ_ONLY_MODE) {
+    server.tool(
+      "cancel_order",
+      "Cancel a working order by id. Usage: `{ \"accountId\":\"abc\",\"orderId\":\"12345\" }`.",
+      CancelOrderZodShape,
+      async (args) => await handlers.cancelOrder(args)
+    );
+  }
+
+  // Register modify_order tool (skip if in read-only mode)
+  if (!userConfig?.IB_READ_ONLY_MODE) {
+    server.tool(
+      "modify_order",
+      "Modify a working order (price, quantity, orderType, tif, outsideRTH, trailing). " +
+      "Provide only the fields you want to change. Pass `extraFields` for any IBKR field not listed. " +
+      "Usage: `{ \"accountId\":\"abc\",\"orderId\":\"12345\",\"price\":188.5 }`.",
+      ModifyOrderZodShape,
+      async (args) => await handlers.modifyOrder(args)
+    );
+  }
+
+  // Register suppress_questions tool (skip if in read-only mode)
+  if (!userConfig?.IB_READ_ONLY_MODE) {
+    server.tool(
+      "suppress_questions",
+      "Suppress order-placement confirmation prompts for the current session by their messageIds. " +
+      "Useful to avoid being prompted repeatedly for the same warning across multiple orders. " +
+      "Usage: `{ \"messageIds\":[\"o10151\",\"o10153\"] }`.",
+      SuppressQuestionsZodShape,
+      async (args) => await handlers.suppressQuestions(args)
+    );
+
+    server.tool(
+      "reset_question_suppression",
+      "Reset all previously suppressed order-confirmation messages for the current session. " +
+      "Usage: `{ \"confirm\": true }`.",
+      ResetQuestionSuppressionZodShape,
+      async (args) => await handlers.resetQuestionSuppression(args)
     );
   }
 

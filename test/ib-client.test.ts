@@ -195,37 +195,61 @@ describe('IBClient', () => {
         await expect(client.getMarketData('INVALID')).rejects.toBeInstanceOf(SymbolNotFoundError);
       });
 
-      it('should include exchange in secdef/search URL when provided', async () => {
+      it('should search secdef by symbol only and filter results by exchange client-side', async () => {
         const mockClient = vi.mocked(axios.create).mock.results[0].value;
 
+        // Search returns two listings; only the NASDAQ one should be picked.
         mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
+          data: [
+            { conid: 111, symbol: 'AAPL', description: 'NYSE', companyHeader: 'APPLE INC - NYSE' },
+            { conid: 265598, symbol: 'AAPL', description: 'NASDAQ', companyHeader: 'APPLE INC - NASDAQ' },
+          ],
         });
         mockClient.get.mockResolvedValueOnce({
           data: [{ conid: 265598, price: 150.25 }],
         });
 
-        await client.getMarketData('AAPL', 'NASDAQ');
+        const result = await client.getMarketData('AAPL', 'NASDAQ');
 
+        // URL should not include the broken &name= filter.
+        const searchCall = (mockClient.get as any).mock.calls[0][0];
+        expect(searchCall).toBe('/iserver/secdef/search?symbol=AAPL');
+        // Snapshot should be requested for the NASDAQ-listed conid.
         expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ')
+          expect.stringContaining('conids=265598')
         );
+        expect(result.contract.conid).toBe(265598);
       });
 
-      it('should URL-encode the exchange parameter', async () => {
+      it('should fall back to all results when no row matches the requested exchange', async () => {
         const mockClient = vi.mocked(axios.create).mock.results[0].value;
 
         mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
+          data: [{ conid: 265598, symbol: 'AAPL', description: 'NASDAQ' }],
         });
         mockClient.get.mockResolvedValueOnce({
           data: [{ conid: 265598, price: 150.25 }],
         });
 
-        await client.getMarketData('AAPL', 'NYSE ARCA');
+        // No listing claims NYSE — caller still gets the only available row instead of an empty error.
+        const result = await client.getMarketData('AAPL', 'NYSE');
+        expect(result.contract.conid).toBe(265598);
+      });
+
+      it('should accept a custom fields CSV', async () => {
+        const mockClient = vi.mocked(axios.create).mock.results[0].value;
+
+        mockClient.get.mockResolvedValueOnce({
+          data: [{ conid: 265598, symbol: 'AAPL', description: 'NASDAQ' }],
+        });
+        mockClient.get.mockResolvedValueOnce({
+          data: [{ conid: 265598, price: 150.25 }],
+        });
+
+        await client.getMarketData('AAPL', undefined, '31,7308,7309,7310,7311');
 
         expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('&name=NYSE%20ARCA')
+          expect.stringContaining('fields=31%2C7308%2C7309%2C7310%2C7311')
         );
       });
 
@@ -371,11 +395,11 @@ describe('IBClient', () => {
         );
       });
 
-      it('should include exchange in secdef/search URL when provided', async () => {
+      it('should search secdef by symbol only (no broken &name= filter) when exchange is provided', async () => {
         const mockClient = vi.mocked(axios.create).mock.results[0].value;
 
         mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
+          data: [{ conid: 265598, symbol: 'AAPL', description: 'NASDAQ' }],
         });
         mockClient.post.mockResolvedValueOnce({
           data: [{ id: 'order-123' }],
@@ -390,9 +414,7 @@ describe('IBClient', () => {
           exchange: 'NASDAQ',
         });
 
-        expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ')
-        );
+        expect(mockClient.get).toHaveBeenCalledWith('/iserver/secdef/search?symbol=AAPL');
       });
 
       it('should include exchange in the order payload when specified', async () => {
@@ -733,6 +755,91 @@ describe('IBClient', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('Order Lifecycle', () => {
+    it('cancelOrder should DELETE the order endpoint', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.delete = vi.fn().mockResolvedValue({ data: { msg: 'Request was submitted' } });
+
+      const result = await client.cancelOrder('U12345', '789');
+
+      expect(mockClient.delete).toHaveBeenCalledWith('/iserver/account/U12345/order/789');
+      expect(result).toEqual({ msg: 'Request was submitted' });
+    });
+
+    it('modifyOrder should POST modifications to the order endpoint', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValueOnce({ data: [{ order_id: '789', status: 'PreSubmitted' }] });
+
+      const mods = { price: 188.5, quantity: 5, tif: 'GTC' };
+      const result = await client.modifyOrder('U12345', '789', mods);
+
+      expect(mockClient.post).toHaveBeenCalledWith('/iserver/account/U12345/order/789', mods);
+      expect(result).toEqual([{ order_id: '789', status: 'PreSubmitted' }]);
+    });
+
+    it('previewOrder should POST a whatif request wrapped as { orders: [...] }', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValueOnce({
+        data: { amount: { commission: '1.00' }, initial: { current: '100', change: '50' } },
+      });
+
+      const order = { conid: 265598, side: 'BUY', orderType: 'LMT', quantity: 100, price: 185, tif: 'DAY' };
+      const result = await client.previewOrder('U12345', order);
+
+      expect(mockClient.post).toHaveBeenCalledWith('/iserver/account/U12345/order/whatif', { orders: [order] });
+      expect(result.amount.commission).toBe('1.00');
+    });
+
+    it('suppressQuestions should POST a messageIds array', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValueOnce({ data: { status: true } });
+
+      const result = await client.suppressQuestions(['o10151', 'o10153']);
+
+      expect(mockClient.post).toHaveBeenCalledWith(
+        '/iserver/questions/suppress',
+        { messageIds: ['o10151', 'o10153'] }
+      );
+      expect(result.status).toBe(true);
+    });
+
+    it('resetQuestionSuppression should POST to the reset endpoint', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.post.mockResolvedValueOnce({ data: { status: 'reset' } });
+
+      const result = await client.resetQuestionSuppression();
+
+      expect(mockClient.post).toHaveBeenCalledWith('/iserver/questions/suppress/reset');
+      expect(result.status).toBe('reset');
+    });
+
+    it('cancelOrder should surface auth errors via isAuthError', async () => {
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.delete = vi.fn().mockRejectedValueOnce({
+        response: { status: 401, data: { error: 'not authenticated' } },
+      });
+
+      await expect(client.cancelOrder('U12345', '789')).rejects.toMatchObject({
+        message: expect.stringContaining('Authentication required'),
+        isAuthError: true,
+      });
+    });
+  });
+
+  describe('isAuthenticationError', () => {
+    it('should not treat HTTP 500 with a non-auth body as an authentication error', async () => {
+      // Simulate getOrderStatus failing with a 500 from a genuinely-broken upstream.
+      const mockClient = vi.mocked(axios.create).mock.results[0].value;
+      mockClient.get = vi.fn().mockRejectedValueOnce({
+        response: { status: 500, data: { error: 'internal server error' } },
+      });
+
+      await expect(client.getOrderStatus('789')).rejects.toThrow(
+        /Failed to get status for order 789/
+      );
     });
   });
 

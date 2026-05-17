@@ -37,10 +37,15 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).toContain('create_alert');
         expect(registeredTools).toContain('activate_alert');
         expect(registeredTools).toContain('delete_alert');
+        expect(registeredTools).toContain('cancel_order');
+        expect(registeredTools).toContain('modify_order');
+        expect(registeredTools).toContain('suppress_questions');
+        expect(registeredTools).toContain('reset_question_suppression');
 
         // Verify read tools are also registered
         expect(registeredTools).toContain('get_positions');
         expect(registeredTools).toContain('get_market_data');
+        expect(registeredTools).toContain('preview_order');
     });
 
     it('should register ALL tools when read-only mode is EXPLICITLY FALSE', () => {
@@ -64,6 +69,10 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).not.toContain('create_alert');
         expect(registeredTools).not.toContain('activate_alert');
         expect(registeredTools).not.toContain('delete_alert');
+        expect(registeredTools).not.toContain('cancel_order');
+        expect(registeredTools).not.toContain('modify_order');
+        expect(registeredTools).not.toContain('suppress_questions');
+        expect(registeredTools).not.toContain('reset_question_suppression');
 
         // Verify read tools ARE registered
         expect(registeredTools).toContain('get_positions');
@@ -72,5 +81,7 @@ describe('Read-Only Mode Tool Registration', () => {
         expect(registeredTools).toContain('get_live_orders');
         expect(registeredTools).toContain('get_order_status');
         expect(registeredTools).toContain('get_alerts');
+        // preview_order is no-trading by design and remains available even when read-only.
+        expect(registeredTools).toContain('preview_order');
     });
 });

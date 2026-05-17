@@ -24,6 +24,11 @@ import {
   GetScannerParamsInput,
   RunScannerInput,
   GetOptionsChainInput,
+  CancelOrderInput,
+  ModifyOrderInput,
+  PreviewOrderInput,
+  SuppressQuestionsInput,
+  ResetQuestionSuppressionInput,
 } from "./tool-definitions.js";
 
 export interface ToolHandlerContext {
@@ -871,6 +876,104 @@ export class ToolHandlers {
           },
         ],
       };
+    }
+  }
+
+  // ── Order Lifecycle Methods ─────────────────────────────────────────────────
+
+  async cancelOrder(input: CancelOrderInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await this.context.ibClient.cancelOrder(input.accountId, input.orderId);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async modifyOrder(input: ModifyOrderInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const { accountId, orderId, extraFields, ...rest } = input;
+      const modifications: Record<string, any> = { ...rest, ...(extraFields || {}) };
+      if (modifications.quantity !== undefined) {
+        modifications.quantity = Number(modifications.quantity);
+      }
+      const result = await this.context.ibClient.modifyOrder(accountId, orderId, modifications);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async previewOrder(input: PreviewOrderInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+
+      let conid = input.conid;
+      if (!conid && input.symbol) {
+        const contract = await this.context.ibClient.resolveSymbol(input.symbol, input.exchange);
+        conid = Number(contract.conid);
+      }
+      if (!conid) {
+        return {
+          content: [{ type: "text", text: "Either symbol or conid is required" }],
+        };
+      }
+
+      const order: Record<string, any> = {
+        conid: Number(conid),
+        side: input.action,
+        orderType: input.orderType,
+        quantity: Number(input.quantity),
+        tif: input.tif || "DAY",
+      };
+      if (input.exchange) order.exchange = input.exchange;
+      if (input.price !== undefined) order.price = Number(input.price);
+      if (input.auxPrice !== undefined) order.auxPrice = Number(input.auxPrice);
+      if (input.trailingAmt !== undefined) order.trailingAmt = Number(input.trailingAmt);
+      if (input.trailingType !== undefined) order.trailingType = input.trailingType;
+      if (input.outsideRTH !== undefined) order.outsideRTH = input.outsideRTH;
+
+      const result = await this.context.ibClient.previewOrder(input.accountId, order);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async suppressQuestions(input: SuppressQuestionsInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await this.context.ibClient.suppressQuestions(input.messageIds);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
+    }
+  }
+
+  async resetQuestionSuppression(_input: ResetQuestionSuppressionInput): Promise<ToolHandlerResult> {
+    try {
+      await this.ensureGatewayReady();
+      if (this.context.config.IB_HEADLESS_MODE) {
+        await this.ensureAuth();
+      }
+      const result = await this.context.ibClient.resetQuestionSuppression();
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: this.formatError(error) }] };
     }
   }
 

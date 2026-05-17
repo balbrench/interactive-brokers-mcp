@@ -95,6 +95,51 @@ export const DeleteAlertZodShape = {
   alertId: z.string()
 };
 
+// Order lifecycle Zod Shapes
+export const CancelOrderZodShape = {
+  accountId: z.string(),
+  orderId: z.string()
+};
+
+export const ModifyOrderZodShape = {
+  accountId: z.string(),
+  orderId: z.string(),
+  orderType: z.enum(["MKT", "LMT", "STP", "STP_LIMIT", "TRAIL", "TRAILLMT", "MIDPRICE"]).optional(),
+  quantity: IntegerOrStringIntegerZod.optional(),
+  price: z.number().optional(),
+  auxPrice: z.number().optional(),
+  trailingAmt: z.number().optional(),
+  trailingType: z.enum(["amt", "%"]).optional(),
+  tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional(),
+  outsideRTH: z.boolean().optional(),
+  // Allow callers to pass arbitrary additional IBKR order fields verbatim.
+  extraFields: z.record(z.any()).optional()
+};
+
+export const PreviewOrderZodShape = {
+  accountId: z.string(),
+  symbol: z.string().optional(),
+  conid: z.number().optional(),
+  action: z.enum(["BUY", "SELL"]),
+  orderType: z.enum(["MKT", "LMT", "STP", "STP_LIMIT", "TRAIL", "TRAILLMT", "MIDPRICE"]),
+  quantity: IntegerOrStringIntegerZod,
+  price: z.number().optional(),
+  auxPrice: z.number().optional(),
+  trailingAmt: z.number().optional(),
+  trailingType: z.enum(["amt", "%"]).optional(),
+  exchange: z.string().optional(),
+  tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional(),
+  outsideRTH: z.boolean().optional()
+};
+
+export const SuppressQuestionsZodShape = {
+  messageIds: z.array(z.string()).min(1)
+};
+
+export const ResetQuestionSuppressionZodShape = {
+  confirm: z.literal(true)
+};
+
 // Scanner Zod Shapes
 export const GetScannerParamsZodShape = {
   confirm: z.literal(true)
@@ -176,6 +221,19 @@ export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
 
 export const DeleteAlertZodSchema = z.object(DeleteAlertZodShape);
 
+// Order lifecycle Full Schemas
+export const CancelOrderZodSchema = z.object(CancelOrderZodShape);
+export const ModifyOrderZodSchema = z.object(ModifyOrderZodShape).refine(
+  (data) => Object.keys(data).some((k) => k !== "accountId" && k !== "orderId"),
+  { message: "At least one field must be modified" }
+);
+export const PreviewOrderZodSchema = z.object(PreviewOrderZodShape).refine(
+  (data) => Boolean(data.symbol) || Boolean(data.conid),
+  { message: "Provide either symbol or conid" }
+);
+export const SuppressQuestionsZodSchema = z.object(SuppressQuestionsZodShape);
+export const ResetQuestionSuppressionZodSchema = z.object(ResetQuestionSuppressionZodShape);
+
 // Scanner Full Schemas
 export const GetScannerParamsZodSchema = z.object(GetScannerParamsZodShape);
 export const RunScannerZodSchema = z.object(RunScannerZodShape);
@@ -209,3 +267,8 @@ export type ForgetFlexQueryInput = z.infer<typeof ForgetFlexQueryZodSchema>;
 export type GetScannerParamsInput = z.infer<typeof GetScannerParamsZodSchema>;
 export type RunScannerInput = z.infer<typeof RunScannerZodSchema>;
 export type GetOptionsChainInput = z.infer<typeof GetOptionsChainZodSchema>;
+export type CancelOrderInput = z.infer<typeof CancelOrderZodSchema>;
+export type ModifyOrderInput = z.infer<typeof ModifyOrderZodSchema>;
+export type PreviewOrderInput = z.infer<typeof PreviewOrderZodSchema>;
+export type SuppressQuestionsInput = z.infer<typeof SuppressQuestionsZodSchema>;
+export type ResetQuestionSuppressionInput = z.infer<typeof ResetQuestionSuppressionZodSchema>;

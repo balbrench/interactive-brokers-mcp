@@ -37,6 +37,12 @@ describe('ToolHandlers', () => {
       createAlert: vi.fn().mockResolvedValue({ request_id: '1' }),
       activateAlert: vi.fn().mockResolvedValue({ success: true }),
       deleteAlert: vi.fn().mockResolvedValue({ success: true }),
+      cancelOrder: vi.fn().mockResolvedValue({ msg: 'Request was submitted' }),
+      modifyOrder: vi.fn().mockResolvedValue([{ order_id: '789', status: 'PreSubmitted' }]),
+      previewOrder: vi.fn().mockResolvedValue({ amount: { commission: '1.00' } }),
+      resolveSymbol: vi.fn().mockResolvedValue({ conid: 265598, symbol: 'AAPL' }),
+      suppressQuestions: vi.fn().mockResolvedValue({ status: true }),
+      resetQuestionSuppression: vi.fn().mockResolvedValue({ status: 'reset' }),
     } as any;
 
     // Create mock GatewayManager
@@ -466,6 +472,87 @@ describe('ToolHandlers', () => {
 
       expect(mockIBClient.checkAuthenticationStatus).toHaveBeenCalledTimes(2);
       expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Order Lifecycle Handlers', () => {
+    it('cancelOrder should call IBClient.cancelOrder and return the response', async () => {
+      const result = await handlers.cancelOrder({ accountId: 'U12345', orderId: '789' });
+      expect(mockIBClient.cancelOrder).toHaveBeenCalledWith('U12345', '789');
+      expect(result.content[0].text).toContain('Request was submitted');
+    });
+
+    it('modifyOrder should pass modifications through to IBClient', async () => {
+      await handlers.modifyOrder({
+        accountId: 'U12345',
+        orderId: '789',
+        price: 188.5,
+        quantity: 5,
+        tif: 'GTC',
+      } as any);
+
+      expect(mockIBClient.modifyOrder).toHaveBeenCalledWith(
+        'U12345',
+        '789',
+        expect.objectContaining({ price: 188.5, quantity: 5, tif: 'GTC' })
+      );
+    });
+
+    it('modifyOrder should merge extraFields with primary fields', async () => {
+      await handlers.modifyOrder({
+        accountId: 'U12345',
+        orderId: '789',
+        price: 188.5,
+        extraFields: { outsideRTH: true, ocaGroup: 'bracket-1' },
+      } as any);
+
+      const mods = (mockIBClient.modifyOrder as any).mock.calls[0][2];
+      expect(mods).toMatchObject({ price: 188.5, outsideRTH: true, ocaGroup: 'bracket-1' });
+      // extraFields should not appear under its own key in the outbound payload.
+      expect(mods.extraFields).toBeUndefined();
+    });
+
+    it('previewOrder should resolve symbol to conid and send whatif request', async () => {
+      await handlers.previewOrder({
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 100,
+        price: 185,
+      } as any);
+
+      expect(mockIBClient.resolveSymbol).toHaveBeenCalledWith('AAPL', undefined);
+      expect(mockIBClient.previewOrder).toHaveBeenCalledWith(
+        'U12345',
+        expect.objectContaining({ conid: 265598, side: 'BUY', orderType: 'LMT', quantity: 100, price: 185, tif: 'DAY' })
+      );
+    });
+
+    it('previewOrder should pass conid directly when provided (skipping resolveSymbol)', async () => {
+      await handlers.previewOrder({
+        accountId: 'U12345',
+        conid: 111111,
+        action: 'SELL',
+        orderType: 'MKT',
+        quantity: 10,
+      } as any);
+
+      expect(mockIBClient.resolveSymbol).not.toHaveBeenCalled();
+      expect(mockIBClient.previewOrder).toHaveBeenCalledWith(
+        'U12345',
+        expect.objectContaining({ conid: 111111, side: 'SELL', orderType: 'MKT', quantity: 10 })
+      );
+    });
+
+    it('suppressQuestions should forward messageIds', async () => {
+      await handlers.suppressQuestions({ messageIds: ['o10151', 'o10153'] });
+      expect(mockIBClient.suppressQuestions).toHaveBeenCalledWith(['o10151', 'o10153']);
+    });
+
+    it('resetQuestionSuppression should call the underlying client', async () => {
+      await handlers.resetQuestionSuppression({ confirm: true });
+      expect(mockIBClient.resetQuestionSuppression).toHaveBeenCalled();
     });
   });
 
