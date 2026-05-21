@@ -21,10 +21,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && echo '#!/usr/bin/env node' | cat - dist/index.js > temp && mv temp dist/index.js && chmod +x dist/index.js",
+    "build": "tsc && node -e \"const fs=require('fs'); const dst='dist/index.js'; const data='#!/usr/bin/env node\\n'+fs.readFileSync(dst,'utf8'); fs.writeFileSync(dst,data); try { fs.chmodSync(dst, 0o755) } catch {}\"",
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
-    "start:http": "MCP_HTTP_SERVER=true node dist/index-http.js",
+    "start:http": "node --input-type=module -e \"process.env.MCP_HTTP_SERVER='true'; import('./dist/index-http.js');\"",
     "dev": "tsx src/index.ts",
     "dev:http": "MCP_HTTP_SERVER=true tsx src/index-http.ts",
     "watch": "tsc --watch",
